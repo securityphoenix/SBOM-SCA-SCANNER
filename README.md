@@ -1,7 +1,22 @@
 # SBOM / SCA Scanner Pipeline for Phoenix Security
 
+![Phoenix Purple — building your software supply-chain map with SCA, SBOM and EU CRA readiness](artefacts/SBOM-Scanning-PHOENIX.jpeg)
+
 Scan a repository or a container image, produce a CycloneDX SBOM, and import the results into
 [Phoenix Security](https://phoenix.security).
+
+## What it covers
+
+| Coverage | What you get | How |
+| --- | --- | --- |
+| **SBOM** | A CycloneDX inventory of every component and version, direct and transitive. | `trivy fs` / `trivy image` / `cdxgen` / dep-scan, imported as `installedSoftware`. |
+| **Dependency vulnerabilities in CI** | Vulnerable open-source packages found on every build, mapped to `repo/file:branch`. | `--scanners vuln` in the scan, then either importer. |
+| **Container image vulnerabilities** | OS packages and application layers in a built image, tied to registry, image, tag and digest. | `trivy image --scanners vuln`, then `--asset-kind CONTAINER_IMAGE` (purple) or `--file-path Dockerfile` (orange). |
+| **EU CRA readiness** | Component visibility plus vulnerability and remediation evidence. | The SBOM and findings Phoenix holds after import. |
+
+![SCA and SBOM software supply chain security — discover, analyse, prioritise, SBOM, remediate, EU CRA](artefacts/SBOM-Scanning-PHOENIX-infographic.jpeg)
+
+## Which importer
 
 This repository ships **two independent importers**. They target two different Phoenix APIs.
 Pick one — you do not need both.
