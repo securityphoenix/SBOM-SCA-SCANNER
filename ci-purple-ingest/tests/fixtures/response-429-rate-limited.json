@@ -1,0 +1,10 @@
+{
+  "code": "rate_limited",
+  "message": "Too many ingest requests for this organization. Retry after the interval given in the Retry-After header.",
+  "field": null,
+  "retryable": true,
+  "_headers": {
+    "_comment": "Documentation only — JSON has no headers, so this object is NOT part of the actual HTTP response body. It documents the real Retry-After header the design (§8.2, §3.1) requires on every 429.",
+    "Retry-After": "1"
+  }
+}

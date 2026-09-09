@@ -1,0 +1,217 @@
+# CI-PURPLE CONTAINER SBOM ingest -> Phoenix, for GitHub Actions.
+#
+# The sibling github-actions-ci-purple-ingest.yml.example covers asset.kind=REPO (a build-file
+# SBOM produced by cdxgen). This one covers asset.kind=CONTAINER_IMAGE: it scans a built container
+# image with Trivy and submits the resulting CycloneDX document against the image's identity
+# (registry/image/tag/digest) rather than a manifest path.
+#
+# Copy to .github/workflows/ci-purple-container-ingest.yml and add one repository secret:
+# PHOENIX_API_KEY - an API key created with EXACTLY scopes: ["ci:ingest"].
+#
+# WITH or WITHOUT vulnerabilities, both are supported and both are useful:
+#   include_vulnerabilities: true   -> Trivy `--scanners vuln`; the document carries findings, and
+#                                     the server UNIONS them with its own dep-scan output
+#                                     (CiIngestProjectionService merges by CVE id, deduplicated).
+#   include_vulnerabilities: false  -> Trivy `--scanners none`; a pure inventory SBOM, and the
+#                                     server derives every finding itself.
+# Neither is "the" mode. Submitting an inventory-only SBOM does NOT mean no findings.
+#
+# CVE-ID policy applies to whatever the file carries: sbom.vulnerabilities[].id must be
+# CVE-YYYY-NNNN(N...). Trivy emits GHSA-/OSV-prefixed ids for advisories with no CVE assigned, and
+# those are REJECTED with unsupported_vulnerability_id rather than silently dropped. If that bites,
+# submit inventory-only and let the server's dep-scan pass supply the findings.
+
+name: CI-PURPLE container SBOM ingest
+
+on:
+  workflow_dispatch:
+    inputs:
+      image_ref:
+        description: "Full image reference to scan, e.g. ghcr.io/acme/payments:v1.2.3. Must already exist in the registry (or locally, for a build-then-scan job)."
+        type: string
+        required: true
+      dockerfile_path:
+        description: "Dockerfile path relative to the repo root (recorded as provenance.dockerfilePath; required for CONTAINER_IMAGE)"
+        type: string
+        default: "Dockerfile"
+      include_vulnerabilities:
+        description: "Run Trivy's vulnerability scanners. Off = inventory-only SBOM; the server still enriches it."
+        type: boolean
+        default: true
+      wait_for_completion:
+        description: "Poll until terminal and fail the build on a BLOCK verdict (exit 3)."
+        type: boolean
+        default: false
+
+  workflow_call:
+    inputs:
+      image_ref:
+        type: string
+        required: true
+      dockerfile_path:
+        type: string
+        default: "Dockerfile"
+      include_vulnerabilities:
+        type: boolean
+        default: true
+      wait_for_completion:
+        type: boolean
+        default: false
+      utils_ref:
+        description: "Ref of the autoconfig-priv-PYRUS-PRIV-NEW repository holding this client"
+        type: string
+        default: main
+    secrets:
+      PHOENIX_API_KEY:
+        required: true
+      PHOENIX_UTILS_TOKEN:
+        description: "Read access to the repository holding this client. Only needed when it is private."
+        required: false
+
+permissions:
+  contents: read
+  packages: read   # needed only when image_ref lives in this repository's own GHCR
+
+jobs:
+  ci-purple-container-ingest:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+
+    env:
+      SBOM_FILE: ${{ github.workspace }}/container-sbom.cdx.json
+      # Pin this by digest (`aquasec/trivy@sha256:...`) before using the template in anger. It is
+      # left as a version tag here because this file ships without a verified digest -- writing a
+      # made-up one would be worse than an honest tag.
+      TRIVY_IMAGE: aquasec/trivy:0.58.1
+
+    steps:
+      - name: Check out the repository under scan
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Resolve the image digest
+        id: resolve
+        env:
+          IMAGE_REF: ${{ inputs.image_ref }}
+        run: |
+          set -euo pipefail
+          # asset.digest is the immutable identity Phoenix keys the container asset on; the tag can
+          # be re-pointed, the digest cannot. Pull so the digest is resolvable locally, then read
+          # the RepoDigest back rather than trusting the caller to supply one.
+          docker pull --quiet "$IMAGE_REF"
+          digest="$(docker inspect --format '{{ index .RepoDigests 0 }}' "$IMAGE_REF" | cut -d@ -f2)"
+          case "$digest" in
+            sha256:*) : ;;
+            *) echo "Could not resolve a sha256 digest for $IMAGE_REF (got '${digest:-<empty>}')." >&2; exit 1 ;;
+          esac
+          # Split registry / image / tag for the three separate CLI flags the client expects.
+          ref_no_digest="${IMAGE_REF%@*}"
+          # A colon is only a TAG separator when it comes after the last slash; otherwise it is a
+          # registry port (localhost:5000/acme/app).
+          last_segment="${ref_no_digest##*/}"
+          case "$last_segment" in
+            *:*) tag="${last_segment##*:}"; name_only="${ref_no_digest%:*}" ;;
+            *)   tag="latest";              name_only="$ref_no_digest"      ;;
+          esac
+          # Docker's own rule: the first path component is a REGISTRY only when it looks like a
+          # host -- contains a dot or a colon, or is exactly "localhost". Otherwise it is a Docker
+          # Hub namespace and the registry is docker.io. Without this, `ghcr.io/payments:v1`
+          # (a single-segment image on a real registry) is mis-split as docker.io/ghcr.io/payments.
+          first="${name_only%%/*}"
+          case "$name_only" in
+            */*)
+              case "$first" in
+                *.*|*:*|localhost) registry="$first";    image="${name_only#*/}" ;;
+                *)                 registry="docker.io"; image="$name_only"      ;;
+              esac ;;
+            *) registry="docker.io"; image="$name_only" ;;
+          esac
+          {
+            echo "registry=$registry"
+            echo "image=$image"
+            echo "tag=$tag"
+            echo "digest=$digest"
+          } >> "$GITHUB_OUTPUT"
+          echo "Resolved: registry=$registry image=$image tag=$tag digest=$digest"
+
+      - name: Generate container SBOM with Trivy
+        env:
+          IMAGE_REF: ${{ inputs.image_ref }}
+          WITH_VULNS: ${{ inputs.include_vulnerabilities }}
+        run: |
+          set -euo pipefail
+          mkdir -p "${{ runner.temp }}/reports"
+          chmod 777 "${{ runner.temp }}/reports"
+          scanners="none"
+          if [ "$WITH_VULNS" = "true" ]; then scanners="vuln"; fi
+          # The Docker socket mount lets Trivy read the image the previous step pulled, so this
+          # never re-authenticates to the registry on its own.
+          docker run --rm \
+            -v /var/run/docker.sock:/var/run/docker.sock:ro \
+            -v "${{ runner.temp }}/reports:/reports:rw" \
+            "$TRIVY_IMAGE" image \
+              --format cyclonedx \
+              --scanners "$scanners" \
+              --output /reports/container-sbom.cdx.json \
+              "$IMAGE_REF"
+          cp "${{ runner.temp }}/reports/container-sbom.cdx.json" "$SBOM_FILE"
+          echo "SBOM: $(jq '(.components // []) | length' "$SBOM_FILE") components, \
+            $(jq '(.vulnerabilities // []) | length' "$SBOM_FILE") vulnerabilities"
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Check out the ci-purple-ingest client
+        uses: actions/checkout@v4
+        with:
+          repository: securityphoenix/autoconfig-priv-PYRUS-PRIV-NEW
+          ref: ${{ inputs.utils_ref || 'main' }}
+          path: .phoenix-utils
+          token: ${{ secrets.PHOENIX_UTILS_TOKEN || github.token }}
+
+      - name: Install client dependencies
+        run: |
+          python3 -m pip install --disable-pip-version-check \
+            -r .phoenix-utils/Utils/SBOM-SCA-CONTAINER-PIPELINE/ci-purple-ingest/requirements.txt
+
+      - name: Submit to CI-PURPLE ingest
+        env:
+          PHOENIX_API_KEY: ${{ secrets.PHOENIX_API_KEY }}
+          PHOENIX_API_BASE_URL: ${{ vars.PHOENIX_API_BASE_URL || 'https://api.securityphoenix.cloud' }}
+          REGISTRY: ${{ steps.resolve.outputs.registry }}
+          IMAGE: ${{ steps.resolve.outputs.image }}
+          TAG: ${{ steps.resolve.outputs.tag }}
+          DIGEST: ${{ steps.resolve.outputs.digest }}
+          DOCKERFILE_PATH: ${{ inputs.dockerfile_path }}
+          WAIT: ${{ inputs.wait_for_completion }}
+        run: |
+          set -euo pipefail
+          wait_flag=""
+          if [ "$WAIT" = "true" ]; then wait_flag="--wait"; fi
+
+          # provenance.builtFromRepo / builtFromCommit are DERIVED by the client from the CI
+          # environment, never passed here -- the server rejects a caller-supplied value.
+          # asset.buildFilePath is likewise rejected for CONTAINER_IMAGE: the two asset kinds have
+          # disjoint field sets and supplying the other kind's field is a 400.
+          python3 .phoenix-utils/Utils/SBOM-SCA-CONTAINER-PIPELINE/ci-purple-ingest/ci_purple_sbom_to_phoenix.py \
+            --sbom-file "$SBOM_FILE" \
+            --asset-kind CONTAINER_IMAGE \
+            --registry "$REGISTRY" \
+            --image "$IMAGE" \
+            --tag "$TAG" \
+            --digest "$DIGEST" \
+            --dockerfile-path "$DOCKERFILE_PATH" \
+            $wait_flag
+          # Exit codes: 0 = accepted (and with --wait, terminal PASS/WARN); 1 = client/ingest
+          # error; 3 = --wait completed with verdict BLOCK, which fails the job here.
+
+      - name: Upload container SBOM as a build artifact
+        if: always() && hashFiles('container-sbom.cdx.json') != ''
+        uses: actions/upload-artifact@v4
+        with:
+          name: ci-purple-container-sbom-${{ github.run_number }}
+          path: container-sbom.cdx.json
+          retention-days: 30

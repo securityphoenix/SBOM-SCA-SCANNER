@@ -1,0 +1,44 @@
+; CI-PURPLE ingest — local configuration template.
+;
+; USAGE
+;   cp config.ini.template config.ini      # config.ini is gitignored; never commit it
+;   python3 ci_purple_sbom_to_phoenix.py --sbom-file sbom.cdx.json --build-file-path package-lock.json
+;
+; PRECEDENCE (highest first) — a later source never overrides an earlier one:
+;   1. CLI flag            (--api-base-url, --api-key, ...)
+;   2. environment         (PHOENIX_API_BASE_URL, PHOENIX_API_KEY, ...)
+;   3. this file
+;   4. built-in default    (https://api.securityphoenix.cloud)
+;
+; Config sits BELOW the environment on purpose: a CI runner injects credentials as environment
+; variables, and a stale config.ini in a working copy must never silently win over what the
+; pipeline supplied. In CI, set nothing here — use the environment.
+
+[phoenix]
+; Local dev stack (the ":4300 stack"). :4300 is the frontend nginx, which proxies /api/ to the
+; analyzer with a 25MB body cap — comfortably above the 10MiB ingest budget. The analyzer's own
+; port is :4350 if you would rather bypass nginx: http://localhost:4350
+api_base_url = http://localhost:4300
+
+; REQUIRED for an http:// base URL. The client refuses to send a bearer credential over plaintext
+; unless this is set, because http:// is readable by anything on the path. Keep it true ONLY for
+; localhost / lab endpoints; never for a real tenant.
+allow_insecure_http = true
+
+; TLS verification for https:// endpoints. Leave unset (the default is to verify). Set a CA bundle
+; path here only for a private CA.
+; verify_tls = true
+; ca_bundle = /path/to/ca-bundle.pem
+
+[auth]
+; A Phoenix API key scoped with EXACTLY scopes: ["ci:ingest"]. Leave this commented out and export
+; PHOENIX_API_KEY instead wherever you can — a key in a file on disk outlives the shell that set it.
+; api_key = <your-ci-ingest-api-key-here>
+
+[ingest]
+; Defaults for this checkout, so the common invocation gets shorter. CLI flags still win.
+; asset_kind      = REPO            ; or CONTAINER_IMAGE
+; build_file_path = package-lock.json
+; workspace_id    = <phoenix-workspace-uuid>
+; wait            = true
+; poll_interval_seconds = 10

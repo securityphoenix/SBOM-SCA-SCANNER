@@ -1,0 +1,42 @@
+# --- Claude Code workspace ---
+.claude/
+
+# --- Live secrets: NEVER commit ---
+# config.ini holds a real Phoenix client_secret / api_key.
+# Copy config.ini.template -> config.ini locally and keep it out of git.
+config.ini
+**/config.ini
+.env
+*.pem
+*.key
+
+# --- Python ---
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+build/
+dist/
+.venv/
+venv/
+env/
+
+# --- Test / tooling caches ---
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# --- Scan artefacts (regenerated every run) ---
+sbom.cdx.json
+*.vdr.json
+payload-preview.json
+reports/
+
+# --- OS / editor ---
+.DS_Store
+Thumbs.db
+*.swp
+.idea/
+.vscode/

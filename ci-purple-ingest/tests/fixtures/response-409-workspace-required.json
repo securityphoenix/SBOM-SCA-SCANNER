@@ -1,0 +1,6 @@
+{
+  "code": "workspace_required",
+  "message": "Multiple workspaces match this repository's canonical source identity. Supply an explicit workspaceId to disambiguate.",
+  "field": "workspaceId",
+  "retryable": false
+}

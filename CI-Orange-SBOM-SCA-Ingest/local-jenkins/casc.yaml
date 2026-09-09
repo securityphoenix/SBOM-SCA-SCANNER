@@ -1,0 +1,57 @@
+# Jenkins Configuration-as-Code for the local SBOM pipeline test instance.
+#
+# Credentials are read from the environment, never stored here. run.sh exports
+# PHOENIX_CLIENT_ID and PHOENIX_CLIENT_SECRET from a gitignored config.ini before
+# starting the container.
+#
+# This instance is deliberately unsecured and run.sh binds it to 127.0.0.1 only.
+# It is a throwaway test harness - do not expose it or reuse this file for a real
+# controller.
+
+jenkins:
+  systemMessage: "Phoenix SBOM/SCA pipeline - local test instance"
+  numExecutors: 2
+  mode: NORMAL
+  securityRealm: "none"
+  authorizationStrategy: "unsecured"
+  # remotingSecurity is deliberately omitted: Jenkins 2.541 logs a stack trace saying
+  # "Setting AdminWhitelistRule no longer has any effect", which looks like a boot failure
+  # in the harness output but is only a deprecation notice.
+
+credentials:
+  system:
+    domainCredentials:
+      - credentials:
+          - string:
+              scope: GLOBAL
+              id: "phoenix-client-id"
+              secret: "${PHOENIX_CLIENT_ID}"
+              description: "Phoenix API client id"
+          - string:
+              scope: GLOBAL
+              id: "phoenix-client-secret"
+              secret: "${PHOENIX_CLIENT_SECRET}"
+              description: "Phoenix API client secret"
+
+unclassified:
+  location:
+    url: "http://localhost:8080/"
+
+jobs:
+  - script: |
+      pipelineJob('phoenix-sbom-scan') {
+        description('Phoenix SBOM/SCA pipeline, parameterised, built from the seed repository')
+        definition {
+          cpsScm {
+            scm {
+              git {
+                remote { url('/seed-repo') }
+                branch('main')
+                extensions { }
+              }
+            }
+            scriptPath('Jenkinsfile')
+            lightweight(false)
+          }
+        }
+      }

@@ -1,0 +1,57 @@
+{
+  "gitRemoteUrl": "https://github.com/acme-corp/payments-service.git",
+  "branch": "main",
+  "commitSha": "a1b2c3d4e5f60718293a4b5c6d7e8f9012345678",
+  "workspaceId": null,
+  "asset": {
+    "kind": "REPO",
+    "buildFilePath": "backend/build.gradle.kts"
+  },
+  "provenance": {
+    "ciSystem": "GITHUB_ACTIONS",
+    "pipelineId": "run-9182736450",
+    "runUrl": "https://github.com/acme-corp/payments-service/actions/runs/9182736450",
+    "runner": "ubuntu-latest"
+  },
+  "sbom": {
+    "bomFormat": "CycloneDX",
+    "specVersion": "1.5",
+    "serialNumber": "urn:uuid:3e671687-395b-41f5-a30f-a58921a69b79",
+    "version": 1,
+    "metadata": {
+      "timestamp": "2026-08-28T12:00:00Z",
+      "component": {
+        "type": "application",
+        "bom-ref": "payments-service@1.0.0",
+        "name": "payments-service",
+        "version": "1.0.0"
+      }
+    },
+    "components": [
+      {
+        "type": "library",
+        "bom-ref": "pkg:maven/com.fasterxml.jackson.core/jackson-databind@2.15.2",
+        "name": "jackson-databind",
+        "version": "2.15.2",
+        "purl": "pkg:maven/com.fasterxml.jackson.core/jackson-databind@2.15.2",
+        "group": "com.fasterxml.jackson.core"
+      },
+      {
+        "type": "library",
+        "bom-ref": "pkg:npm/lodash@4.17.21",
+        "name": "lodash",
+        "version": "4.17.21",
+        "purl": "pkg:npm/lodash@4.17.21"
+      }
+    ],
+    "dependencies": [
+      {
+        "ref": "payments-service@1.0.0",
+        "dependsOn": [
+          "pkg:maven/com.fasterxml.jackson.core/jackson-databind@2.15.2",
+          "pkg:npm/lodash@4.17.21"
+        ]
+      }
+    ]
+  }
+}

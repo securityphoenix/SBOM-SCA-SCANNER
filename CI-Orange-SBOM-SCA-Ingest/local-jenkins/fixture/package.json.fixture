@@ -1,0 +1,13 @@
+{
+  "name": "phoenix-demo-service",
+  "version": "1.4.2",
+  "description": "Fake build fixture for Phoenix SBOM pipeline testing",
+  "main": "index.js",
+  "dependencies": {
+    "lodash": "4.17.11",
+    "minimist": "1.2.0",
+    "axios": "0.21.0",
+    "handlebars": "4.0.13",
+    "yargs-parser": "13.1.1"
+  }
+}

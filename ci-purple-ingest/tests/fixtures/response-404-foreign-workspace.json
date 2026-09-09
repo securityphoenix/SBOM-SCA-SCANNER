@@ -1,0 +1,6 @@
+{
+  "code": "workspace_not_found",
+  "message": "The requested workspace does not exist or does not belong to your organization.",
+  "field": "workspaceId",
+  "retryable": false
+}

@@ -1,0 +1,6 @@
+{
+  "code": "invalid_input",
+  "message": "Field 'asset.buildFilePath' is only valid when asset.kind is REPO; it was supplied on a CONTAINER_IMAGE asset and is rejected, not ignored.",
+  "field": "asset.buildFilePath",
+  "retryable": false
+}

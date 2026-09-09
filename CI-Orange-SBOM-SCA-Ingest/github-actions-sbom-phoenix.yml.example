@@ -1,0 +1,356 @@
+# SBOM / SCA -> Phoenix, for GitHub Actions.
+#
+# Copy to .github/workflows/sbom-phoenix.yml in the repository you want to scan, and add two
+# repository secrets: PHOENIX_CLIENT_ID and PHOENIX_CLIENT_SECRET.
+#
+# If the importer lives in a private repository (see utils_repo below), also add
+# PHOENIX_UTILS_TOKEN with read access to it - the default github.token cannot read a
+# different private repository, and the checkout fails with a confusing 404.
+#
+# Callable two ways: manually via workflow_dispatch, or from another workflow via
+# workflow_call. There is deliberately no push trigger - concurrent uploads to the same
+# Phoenix organization collide server-side (see README), so scans are dispatched rather than
+# fired by every push. Add one only if you also serialise the runs.
+#
+# Three independent choices (see README.md for the full matrix):
+#
+#   phoenix_method  sbom          upload a plain SBOM; Phoenix runs dep-scan over it
+#                   vulnerability scan here, post findings as JSON
+#                   auto          follows an explicit scanner (cdxgen -> sbom, trivy/depscan ->
+#                                 vulnerability); if the scanner is also auto, buildfile -> sbom
+#                                 and image -> vulnerability
+#
+#   scan_mode       buildfile     dependency manifests in the checkout
+#                   image         a container image
+#
+#   scanner         cdxgen        inventory SBOM only            (pairs with phoenix_method=sbom)
+#                   trivy         CycloneDX with vulnerabilities (pairs with vulnerability)
+#                   depscan       OWASP dep-scan VDR             (pairs with vulnerability)
+#                   auto          sbom -> cdxgen, vulnerability -> trivy
+#
+# NOTE on dep-scan: it downloads a ~4GB vulnerability database (~4.4GB for container scans with
+# --vdb-scope app+os). That is impractical on hosted runners, where it exceeds the cache budget
+# and has to be re-fetched per run. Use scanner=trivy on hosted runners; use dep-scan only on
+# self-hosted runners with a warmed depscan-vdb Docker volume.
+
+name: SBOM to Phoenix
+
+on:
+  workflow_dispatch:
+    inputs:
+      phoenix_method:
+        description: "Which Phoenix API to send to"
+        type: choice
+        options: [auto, sbom, vulnerability]
+        default: auto
+      scan_mode:
+        description: "Scan build files or a container image"
+        type: choice
+        options: [buildfile, image]
+        default: buildfile
+      scanner:
+        description: "SBOM producer"
+        type: choice
+        options: [auto, cdxgen, trivy, depscan]
+        default: auto
+      scan_path:
+        description: "buildfile mode: path within the checkout to scan"
+        type: string
+        default: "."
+      container_image:
+        description: "image mode: image reference to scan"
+        type: string
+        default: ""
+      project_type:
+        description: "cdxgen -t value and PhxSbomSca:<projectType> suffix. 'auto' detects the suffix from the BOM"
+        type: string
+        default: auto
+      file_path:
+        description: "Manifest path recorded in the Phoenix asset key"
+        type: string
+        default: package-lock.json
+      import_type:
+        description: "Phoenix import type"
+        type: choice
+        options: [merge, new, delta]
+        default: merge
+      wait_for_completion:
+        description: "sbom method: hold the job until Phoenix finishes importing. Successful imports measured 4-5 minutes; a request still translating long after that has usually collided with another upload and ends in ERROR near 60 minutes. The job's 45-minute timeout bounds the wait either way, and the upload itself is already done at that point"
+        type: boolean
+        default: false
+
+  workflow_call:
+    inputs:
+      phoenix_method:
+        type: string
+        default: auto
+      scan_mode:
+        type: string
+        default: buildfile
+      scanner:
+        type: string
+        default: auto
+      scan_path:
+        type: string
+        default: "."
+      container_image:
+        type: string
+        default: ""
+      project_type:
+        type: string
+        default: auto
+      file_path:
+        type: string
+        default: package-lock.json
+      import_type:
+        type: string
+        default: merge
+      wait_for_completion:
+        type: boolean
+        default: false
+      utils_ref:
+        description: "Ref of the Utils repository holding the importer"
+        type: string
+        default: main
+    secrets:
+      PHOENIX_CLIENT_ID:
+        required: true
+      PHOENIX_CLIENT_SECRET:
+        required: true
+      PHOENIX_UTILS_TOKEN:
+        description: "Read access to the repository holding the importer. Only needed when that repository is private - github.token cannot read another private repository"
+        required: false
+
+permissions:
+  contents: read
+
+jobs:
+  sbom-to-phoenix:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+
+    env:
+      SBOM_FILE: ${{ github.workspace }}/sbom.cdx.json
+      SCAN_REPORTS: ${{ runner.temp }}/phoenix-sbom-reports
+      TRIVY_IMAGE: aquasec/trivy:0.74.0
+      DEPSCAN_IMAGE: ghcr.io/owasp-dep-scan/dep-scan@sha256:c305f241a3c2e35a90472ef7cb971b03904f719a6b736ab40b4a0039ce8470c4
+      DEPSCAN_VDB_VOLUME: depscan-vdb
+
+    steps:
+      - name: Check out the repository under scan
+        uses: actions/checkout@v4
+
+      - name: Resolve method and scanner
+        id: resolve
+        env:
+          IN_METHOD: ${{ inputs.phoenix_method }}
+          IN_MODE: ${{ inputs.scan_mode }}
+          IN_SCANNER: ${{ inputs.scanner }}
+          IN_IMAGE: ${{ inputs.container_image }}
+        run: |
+          set -euo pipefail
+
+          method="$IN_METHOD"
+          if [ "$method" = "auto" ]; then
+            # An explicit scanner choice already implies the method: cdxgen only produces an
+            # inventory SBOM, while trivy and dep-scan exist to find vulnerabilities. Only when
+            # the scanner is also "auto" does the scan mode decide - build files carry no
+            # vulnerability data of their own so they go to Phoenix for analysis, whereas a
+            # container image is scanned here and the findings are sent.
+            case "$IN_SCANNER" in
+              cdxgen)          method="sbom" ;;
+              trivy|depscan)   method="vulnerability" ;;
+              *)               if [ "$IN_MODE" = "buildfile" ]; then method="sbom"; else method="vulnerability"; fi ;;
+            esac
+          fi
+
+          # cdxgen cannot export a container image from inside its own container - it reports
+          # "Unable to pull <image>" even when the image is local - so an image-mode inventory
+          # SBOM comes from Trivy with the vulnerability scanners switched off instead.
+          scanner="$IN_SCANNER"
+          if [ "$scanner" = "auto" ]; then
+            if [ "$method" = "sbom" ] && [ "$IN_MODE" != "image" ]; then
+              scanner="cdxgen"
+            else
+              scanner="trivy"
+            fi
+          fi
+
+          if [ "$scanner" = "cdxgen" ] && [ "$IN_MODE" = "image" ]; then
+            echo "::error::scanner=cdxgen cannot build an SBOM from a container image: it runs inside its own container and cannot export the image through the mounted Docker socket. Use scanner=trivy, or leave scanner=auto."
+            exit 1
+          fi
+
+          if [ "$method" = "vulnerability" ] && [ "$scanner" = "cdxgen" ]; then
+            echo "::error::scanner=cdxgen produces an inventory SBOM with no vulnerabilities, so phoenix_method=vulnerability would import zero findings. Use trivy or depscan, or switch to phoenix_method=sbom."
+            exit 1
+          fi
+          if [ "$method" = "sbom" ] && [ "$scanner" = "depscan" ]; then
+            echo "::error::scanner=depscan runs the vulnerability analysis Phoenix would run again for phoenix_method=sbom. Use cdxgen, or switch to phoenix_method=vulnerability."
+            exit 1
+          fi
+          if [ "$IN_MODE" = "image" ] && [ -z "$IN_IMAGE" ]; then
+            echo "::error::scan_mode=image requires container_image to be set."
+            exit 1
+          fi
+
+          echo "method=$method" >> "$GITHUB_OUTPUT"
+          echo "scanner=$scanner" >> "$GITHUB_OUTPUT"
+          echo "### SBOM to Phoenix" >> "$GITHUB_STEP_SUMMARY"
+          echo "- method: \`$method\`" >> "$GITHUB_STEP_SUMMARY"
+          echo "- scan mode: \`$IN_MODE\`" >> "$GITHUB_STEP_SUMMARY"
+          echo "- scanner: \`$scanner\`" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Prepare report directory
+        run: |
+          set -euo pipefail
+          rm -rf "$SCAN_REPORTS"
+          mkdir -p "$SCAN_REPORTS"
+          chmod 777 "$SCAN_REPORTS"
+
+      # --- cdxgen: inventory SBOM, no vulnerability analysis -------------------------------
+      - name: Generate SBOM with cdxgen
+        if: steps.resolve.outputs.scanner == 'cdxgen'
+        env:
+          SCAN_MODE: ${{ inputs.scan_mode }}
+          SCAN_PATH: ${{ inputs.scan_path }}
+          CONTAINER_IMAGE: ${{ inputs.container_image }}
+          PROJECT_TYPE: ${{ inputs.project_type }}
+        run: |
+          set -euo pipefail
+          # Build files only - image mode is rejected during resolution because cdxgen cannot
+          # export an image from inside its own container. cdxgen also refuses to run with root
+          # privileges, so it uses the image's default user and a world-writable report dir.
+          # cdxgen has no notion of 'auto' and rejects an unknown -t: detection happens in the
+          # importer, from the BOM produced here, so cdxgen itself scans broadly.
+          CDXGEN_TYPE="$PROJECT_TYPE"
+          if [ -z "$CDXGEN_TYPE" ] || [ "$CDXGEN_TYPE" = "auto" ]; then CDXGEN_TYPE=universal; fi
+          docker run --rm \
+            -v "$GITHUB_WORKSPACE:/app:ro" \
+            -v "$SCAN_REPORTS:/reports:rw" \
+            --entrypoint cdxgen "$DEPSCAN_IMAGE" \
+            -t "$CDXGEN_TYPE" -o /reports/sbom.cdx.json "/app/$SCAN_PATH"
+          cp "$SCAN_REPORTS/sbom.cdx.json" "$SBOM_FILE"
+
+      # --- trivy: CycloneDX with vulnerabilities -------------------------------------------
+      - name: Generate SBOM with Trivy
+        if: steps.resolve.outputs.scanner == 'trivy'
+        env:
+          SCAN_MODE: ${{ inputs.scan_mode }}
+          SCAN_PATH: ${{ inputs.scan_path }}
+          CONTAINER_IMAGE: ${{ inputs.container_image }}
+          METHOD: ${{ steps.resolve.outputs.method }}
+        run: |
+          set -euo pipefail
+          # For the vulnerability method --scanners vuln is required: without it Trivy emits an
+          # inventory-only SBOM with an empty "vulnerabilities" array and Phoenix receives 0
+          # findings. For the sbom method Phoenix does the analysis, so the flag is omitted
+          # rather than scanning and throwing the result away.
+          scanners_arg=""
+          if [ "$METHOD" = "vulnerability" ]; then scanners_arg="--scanners vuln"; fi
+
+          if [ "$SCAN_MODE" = "image" ]; then
+            docker run --rm \
+              -v /var/run/docker.sock:/var/run/docker.sock \
+              -v "$GITHUB_WORKSPACE:/workspace" \
+              "$TRIVY_IMAGE" image \
+              $scanners_arg --format cyclonedx \
+              --output /workspace/sbom.cdx.json "$CONTAINER_IMAGE"
+          else
+            docker run --rm \
+              -v "$GITHUB_WORKSPACE:/workspace" \
+              "$TRIVY_IMAGE" fs \
+              $scanners_arg --format cyclonedx \
+              --output /workspace/sbom.cdx.json "/workspace/$SCAN_PATH"
+          fi
+
+      # --- dep-scan: CycloneDX VDR (self-hosted runners only) ------------------------------
+      - name: Generate VDR with OWASP dep-scan
+        if: steps.resolve.outputs.scanner == 'depscan'
+        env:
+          SCAN_MODE: ${{ inputs.scan_mode }}
+          SCAN_PATH: ${{ inputs.scan_path }}
+          CONTAINER_IMAGE: ${{ inputs.container_image }}
+        run: |
+          set -euo pipefail
+          docker volume create "$DEPSCAN_VDB_VOLUME" >/dev/null
+
+          if [ "$SCAN_MODE" = "image" ]; then
+            docker run --rm -u root \
+              -v "$DEPSCAN_VDB_VOLUME:/vdb" -e VDB_HOME=/vdb \
+              -v /var/run/docker.sock:/var/run/docker.sock \
+              -v "$SCAN_REPORTS:/reports:rw" \
+              "$DEPSCAN_IMAGE" \
+              depscan --no-banner --vdb-scope app+os \
+                --src "$CONTAINER_IMAGE" --reports-dir /reports
+          else
+            docker run --rm -u root \
+              -v "$DEPSCAN_VDB_VOLUME:/vdb" -e VDB_HOME=/vdb \
+              -v "$GITHUB_WORKSPACE:/app:ro" \
+              -v "$SCAN_REPORTS:/reports:rw" \
+              "$DEPSCAN_IMAGE" \
+              depscan --no-banner --vdb-scope app \
+                --src "/app/$SCAN_PATH" --reports-dir /reports
+          fi
+
+          # dep-scan names the VDR sbom-<project_type>.vdr.json, so it is located by glob.
+          vdr=$(ls -1 "$SCAN_REPORTS"/*.vdr.json 2>/dev/null | head -1)
+          if [ -z "$vdr" ]; then
+            echo "::error::dep-scan produced no .vdr.json under $SCAN_REPORTS. The most common cause is a failed vulnerability-database download - see the step log."
+            ls -la "$SCAN_REPORTS" || true
+            exit 1
+          fi
+          echo "Using dep-scan VDR: $vdr"
+          cp "$vdr" "$SBOM_FILE"
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Check out the Phoenix importer
+        uses: actions/checkout@v4
+        with:
+          repository: securityphoenix/autoconfig-priv-PYRUS-PRIV-NEW
+          ref: ${{ inputs.utils_ref || 'main' }}
+          path: .phoenix-utils
+          token: ${{ secrets.PHOENIX_UTILS_TOKEN || github.token }}
+
+      - name: Install importer dependencies
+        run: python3 -m pip install --disable-pip-version-check -r .phoenix-utils/Utils/SBOM-SCA-CONTAINER-PIPELINE/sbom-single-repo/requirements.txt
+
+      - name: Send to Phoenix
+        env:
+          PHOENIX_CLIENT_ID: ${{ secrets.PHOENIX_CLIENT_ID }}
+          PHOENIX_CLIENT_SECRET: ${{ secrets.PHOENIX_CLIENT_SECRET }}
+          PHOENIX_API_BASE_URL: ${{ vars.PHOENIX_API_BASE_URL || 'https://api.securityphoenix.cloud' }}
+          METHOD: ${{ steps.resolve.outputs.method }}
+          PROJECT_TYPE: ${{ inputs.project_type }}
+          FILE_PATH: ${{ inputs.file_path }}
+          IMPORT_TYPE: ${{ inputs.import_type }}
+          WAIT: ${{ inputs.wait_for_completion }}
+        run: |
+          set -euo pipefail
+          wait_flag=""
+          if [ "$METHOD" = "sbom" ] && [ "$WAIT" = "true" ]; then wait_flag="--wait"; fi
+
+          python3 .phoenix-utils/Utils/SBOM-SCA-CONTAINER-PIPELINE/sbom-single-repo/sbom_sca_single_repo_to_phoenix.py \
+            --sbom-file "$SBOM_FILE" \
+            --file-path "$FILE_PATH" \
+            --import-type "$IMPORT_TYPE" \
+            --method "$METHOD" \
+            --project-type "$PROJECT_TYPE" \
+            $wait_flag \
+            --from-github-env
+
+      - name: Upload SBOM as a build artifact
+        if: always() && hashFiles('sbom.cdx.json') != ''
+        uses: actions/upload-artifact@v4
+        with:
+          name: sbom-${{ github.run_number }}
+          path: sbom.cdx.json
+          retention-days: 30
+
+      - name: Clean up
+        if: always()
+        run: rm -rf "$SCAN_REPORTS" "$SBOM_FILE"

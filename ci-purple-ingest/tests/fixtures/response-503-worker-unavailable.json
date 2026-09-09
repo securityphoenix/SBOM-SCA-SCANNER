@@ -1,0 +1,6 @@
+{
+  "code": "worker_unavailable",
+  "message": "No sbom-worker capacity is currently configured for enrichment. This request was not durably accepted.",
+  "field": null,
+  "retryable": true
+}

@@ -1,0 +1,153 @@
+# CI-PURPLE SBOM ingest -> Phoenix, for GitHub Actions.
+#
+# Copy to .github/workflows/ci-purple-sbom-ingest.yml in the repository you want to scan, and add
+# one repository secret: PHOENIX_API_KEY - an API key created with EXACTLY
+# scopes: ["ci:ingest"] (see the README's "Scoped API key" section for how to create one; any
+# other scope set is rejected 403 by the token-mint endpoint).
+#
+# This targets the NEW CI-PURPLE ingest contract (/api/v1/external/sca/ingest), NOT the older
+# /v1/import/assets* routes the sibling sbom-single-repo/ tool uses - see this directory's own
+# README "Naming/placement decision" section for why they are two separate tools.
+#
+# Flow: generate a CycloneDX build-file SBOM with cdxgen -> mint a short-lived CI-ingest token ->
+# submit -> optionally wait and gate the job on the terminal verdict (exit 3 on BLOCK).
+#
+# Bitbucket is not part of this template because it is not a supported CI-PURPLE system in v1 -
+# see the sibling sbom-single-repo/ tool's own Bitbucket example instead.
+
+name: CI-PURPLE SBOM ingest
+
+on:
+  workflow_dispatch:
+    inputs:
+      build_file_path:
+        description: "Manifest path within the checkout to scan (also recorded as asset.buildFilePath)"
+        type: string
+        default: "package-lock.json"
+      scan_path:
+        description: "Directory cdxgen scans to produce the SBOM"
+        type: string
+        default: "."
+      project_type:
+        description: "cdxgen -t value (universal, js, python, java, go, ...)"
+        type: string
+        default: universal
+      wait_for_completion:
+        description: "Poll until the ingest job reaches a terminal state and fail the build on a BLOCK verdict. Off = fire-and-forget (submit and exit 0 on 202)."
+        type: boolean
+        default: false
+
+  workflow_call:
+    inputs:
+      build_file_path:
+        type: string
+        default: "package-lock.json"
+      scan_path:
+        type: string
+        default: "."
+      project_type:
+        type: string
+        default: universal
+      wait_for_completion:
+        type: boolean
+        default: false
+      utils_ref:
+        description: "Ref of the autoconfig-priv-PYRUS-PRIV-NEW repository holding this client"
+        type: string
+        default: main
+    secrets:
+      PHOENIX_API_KEY:
+        required: true
+      PHOENIX_UTILS_TOKEN:
+        description: "Read access to the repository holding this client. Only needed when it is private - github.token cannot read another private repository"
+        required: false
+
+permissions:
+  contents: read
+
+jobs:
+  ci-purple-sbom-ingest:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+
+    env:
+      SBOM_FILE: ${{ github.workspace }}/sbom.cdx.json
+      DEPSCAN_IMAGE: ghcr.io/owasp-dep-scan/dep-scan@sha256:c305f241a3c2e35a90472ef7cb971b03904f719a6b736ab40b4a0039ce8470c4
+
+    steps:
+      - name: Check out the repository under scan
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0 # full history, not strictly required but avoids surprises if a later
+                          # step ever needs more than the commit under test
+
+      # cdxgen (the same tool sbom-single-repo's own template uses) produces an inventory
+      # CycloneDX document. CI-PURPLE ingest does not require the CI job to have already computed
+      # vulnerabilities - unlike sbom-single-repo's "vulnerability" method, the server enriches the
+      # submitted SBOM itself (design Sec 3 "sbom-worker x N replicas ... dep-scan --bom"). A
+      # scanner that ALREADY emits vulnerabilities (Trivy `--scanners vuln`, a dep-scan VDR) works
+      # here too - the CVE-ID policy (CVE-YYYY-NNNN only, GHSA/OSV rejected) applies either way.
+      - name: Generate SBOM with cdxgen
+        env:
+          SCAN_PATH: ${{ inputs.scan_path }}
+          PROJECT_TYPE: ${{ inputs.project_type }}
+        run: |
+          set -euo pipefail
+          mkdir -p "${{ runner.temp }}/reports"
+          chmod 777 "${{ runner.temp }}/reports"
+          docker run --rm \
+            -v "$GITHUB_WORKSPACE:/app:ro" \
+            -v "${{ runner.temp }}/reports:/reports:rw" \
+            --entrypoint cdxgen "$DEPSCAN_IMAGE" \
+            -t "$PROJECT_TYPE" -o /reports/sbom.cdx.json "/app/$SCAN_PATH"
+          cp "${{ runner.temp }}/reports/sbom.cdx.json" "$SBOM_FILE"
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Check out the ci-purple-ingest client
+        uses: actions/checkout@v4
+        with:
+          repository: securityphoenix/autoconfig-priv-PYRUS-PRIV-NEW
+          ref: ${{ inputs.utils_ref || 'main' }}
+          path: .phoenix-utils
+          token: ${{ secrets.PHOENIX_UTILS_TOKEN || github.token }}
+
+      - name: Install client dependencies
+        run: |
+          python3 -m pip install --disable-pip-version-check \
+            -r .phoenix-utils/Utils/SBOM-SCA-CONTAINER-PIPELINE/ci-purple-ingest/requirements.txt
+
+      - name: Submit to CI-PURPLE ingest
+        id: ingest
+        env:
+          PHOENIX_API_KEY: ${{ secrets.PHOENIX_API_KEY }}
+          PHOENIX_API_BASE_URL: ${{ vars.PHOENIX_API_BASE_URL || 'https://api.securityphoenix.cloud' }}
+          BUILD_FILE_PATH: ${{ inputs.build_file_path }}
+          WAIT: ${{ inputs.wait_for_completion }}
+        run: |
+          set -euo pipefail
+          wait_flag=""
+          if [ "$WAIT" = "true" ]; then wait_flag="--wait"; fi
+
+          # --ci-provider/--git-remote-url/--branch/--commit-sha are all auto-detected from the
+          # GITHUB_* environment GitHub Actions itself sets - no flags needed for them here. See
+          # README.md "CI-provider auto-detection" for what is detected and how to override it.
+          python3 .phoenix-utils/Utils/SBOM-SCA-CONTAINER-PIPELINE/ci-purple-ingest/ci_purple_sbom_to_phoenix.py \
+            --sbom-file "$SBOM_FILE" \
+            --asset-kind REPO \
+            --build-file-path "$BUILD_FILE_PATH" \
+            $wait_flag
+          # Exit codes: 0 = accepted (and, with --wait, terminal verdict PASS/WARN); 1 = a client
+          # or ingest error (see the step log); 3 = --wait completed and the verdict is BLOCK -
+          # this step then fails the job on its own non-zero exit, no extra `if:` gate needed.
+
+      - name: Upload SBOM as a build artifact
+        if: always() && hashFiles('sbom.cdx.json') != ''
+        uses: actions/upload-artifact@v4
+        with:
+          name: ci-purple-sbom-${{ github.run_number }}
+          path: sbom.cdx.json
+          retention-days: 30

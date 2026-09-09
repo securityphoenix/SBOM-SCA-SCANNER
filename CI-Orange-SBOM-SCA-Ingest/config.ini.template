@@ -1,0 +1,54 @@
+[phoenix]
+client_id =
+client_secret =
+api_base_url = https://api.securityphoenix.cloud
+# new    baseline - removes every vulnerability previously imported for this assessment
+# merge  update - adds new findings and DELETES previously imported ones absent from the report
+# delta  partial report - adds and updates, never removes
+import_type = merge
+assessment_name = single-repo-sca-sbom
+
+# Which Phoenix API to send to.
+#   vulnerability  POST /v1/import/assets - this script parses vulnerabilities out of the
+#                  SBOM and posts findings. The SBOM must already contain them.
+#   sbom           POST /v1/import/assets/file/translate - uploads the plain SBOM and lets
+#                  Phoenix run dep-scan over it to derive vulnerabilities.
+method = vulnerability
+
+# sbom method only: sent as scanType "PhxSbomSca:<project_type>". It reaches dep-scan and
+# nothing else, so a wrong value costs enrichment silently - the import still succeeds,
+# with fewer vulnerabilities than the SBOM could have yielded.
+#   auto       read the ecosystems out of the BOM's package URLs. A container or OS
+#              image resolves to "universal"; an undetectable BOM warns and falls back
+#              to it. This is the default.
+#   <name>     universal, java, npm, python, go, dotnet, ... A comma-separated list is
+#              accepted for a polyglot repository, as are the cdxgen spellings (js,
+#              nodejs) which are mapped onto Phoenix's (npm).
+project_type = auto
+
+# sbom method only: send this literal scanType instead of "PhxSbomSca:<project_type>".
+# Leave blank for the default. Naming a report format from Phoenix's scanType catalogue
+# ("CycloneDX Scan", "Trivy Scan", "Anchore Grype", ...) makes Phoenix translate the findings
+# the report already contains, rather than run dep-scan to derive its own. Use it whenever the
+# scanner produced vulnerabilities; it also lets Phoenix infer a CONTAINER asset from an image
+# scan. Replaces project_type, which then has no effect.
+scan_type =
+
+[options]
+verify_tls = true
+
+# Allow an http:// api_base_url. Off by default: the token call sends client_id and
+# client_secret as HTTP Basic, which plaintext HTTP exposes on the wire. Turn it on only for a
+# local mock or lab endpoint.
+allow_insecure_http = false
+timeout_seconds = 60
+
+# sbom method only: poll until Phoenix finishes translating and importing.
+# Phoenix runs dep-scan server-side. Successful imports measured 4-5 minutes against a live
+# tenant regardless of SBOM size; the multi-hour cases were requests that had collided with a
+# concurrent upload and ended in ERROR near the 60-minute mark (see README). 1800s is therefore
+# generous for a healthy import and stops a doomed one holding an executor for the full hour.
+# The timeout only bounds the waiting - a request that outlives it keeps translating.
+wait_for_completion = false
+poll_interval_seconds = 10
+poll_timeout_seconds = 1800

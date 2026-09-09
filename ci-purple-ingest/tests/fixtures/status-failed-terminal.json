@@ -1,0 +1,15 @@
+{
+  "jobId": "d290f1ee-6c54-4b01-90e6-d701748f0851",
+  "workspaceId": "b3e1c9a0-1f2d-4a3b-9c8e-7d6f5a4b3c2d",
+  "status": "FAILED",
+  "failureCategory": "INVALID_INPUT",
+  "retryable": false,
+  "result": {
+    "verdict": null,
+    "componentCount": null,
+    "vulnerabilityCount": null,
+    "resultUrl": null
+  },
+  "createdAt": "2026-08-28T12:00:00Z",
+  "updatedAt": "2026-08-28T12:00:03Z"
+}

@@ -1,0 +1,6 @@
+{
+  "code": "request_too_large",
+  "message": "Request body exceeds the 10 MiB ingest limit.",
+  "field": null,
+  "retryable": false
+}

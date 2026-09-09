@@ -1,0 +1,11 @@
+# Pinned to the versions this harness was tested with. jenkins-plugin-cli resolves bare names
+# to whatever is current, so an unpinned list makes the image unreproducible and lets an
+# upstream release break the harness with no local change.
+configuration-as-code:2117.vc05a_0b_e6b_f4e
+workflow-aggregator:608.v67378e9d3db_1
+git:5.10.1
+job-dsl:3732.v9a_c49a_61a_313
+timestamper:1.30
+credentials-binding:728.v902a_273b_8947
+plain-credentials:199.v9f8e1f741799
+pipeline-stage-view:2.41

@@ -1,0 +1,6 @@
+{
+  "code": "terminal_idempotency_conflict",
+  "message": "This exact ingest (organization, workspace, repository, branch, commit, asset, SBOM content) already reached a terminal state that cannot be retried. Changed content creates a new idempotency key.",
+  "field": null,
+  "retryable": false
+}

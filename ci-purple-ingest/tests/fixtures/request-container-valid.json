@@ -1,0 +1,57 @@
+{
+  "gitRemoteUrl": "https://github.com/acme-corp/payments-service.git",
+  "branch": "main",
+  "commitSha": "a1b2c3d4e5f60718293a4b5c6d7e8f9012345678",
+  "workspaceId": null,
+  "asset": {
+    "kind": "CONTAINER_IMAGE",
+    "registry": "ghcr.io",
+    "image": "acme-corp/payments-service",
+    "tag": "v1.0.0",
+    "digest": "sha256:53051592d64c7e4e159dec7166b095629ee08f05389a8a8f6cb937e3071ba93c"
+  },
+  "provenance": {
+    "ciSystem": "GITHUB_ACTIONS",
+    "pipelineId": "run-9182736451",
+    "runUrl": "https://github.com/acme-corp/payments-service/actions/runs/9182736451",
+    "runner": "ubuntu-latest",
+    "builtFromRepo": "https://github.com/acme-corp/payments-service.git",
+    "builtFromCommit": "a1b2c3d4e5f60718293a4b5c6d7e8f9012345678",
+    "dockerfilePath": "backend/Dockerfile",
+    "fromLine": 1,
+    "baseImageRef": "eclipse-temurin:21-jre-jammy"
+  },
+  "sbom": {
+    "bomFormat": "CycloneDX",
+    "specVersion": "1.5",
+    "serialNumber": "urn:uuid:6f2c9e4a-5b8d-4b6a-8c9d-0e1f2a3b4c5d",
+    "version": 1,
+    "metadata": {
+      "timestamp": "2026-08-28T12:05:00Z",
+      "component": {
+        "type": "container",
+        "bom-ref": "ghcr.io/acme-corp/payments-service@sha256:53051592d64c7e4e159dec7166b095629ee08f05389a8a8f6cb937e3071ba93c",
+        "name": "acme-corp/payments-service",
+        "version": "v1.0.0"
+      }
+    },
+    "components": [
+      {
+        "type": "library",
+        "bom-ref": "pkg:deb/debian/zlib1g@1:1.2.13.dfsg-1?arch=amd64",
+        "name": "zlib1g",
+        "version": "1:1.2.13.dfsg-1",
+        "purl": "pkg:deb/debian/zlib1g@1:1.2.13.dfsg-1?arch=amd64"
+      },
+      {
+        "type": "library",
+        "bom-ref": "pkg:maven/com.fasterxml.jackson.core/jackson-databind@2.15.2",
+        "name": "jackson-databind",
+        "version": "2.15.2",
+        "purl": "pkg:maven/com.fasterxml.jackson.core/jackson-databind@2.15.2",
+        "group": "com.fasterxml.jackson.core"
+      }
+    ],
+    "dependencies": []
+  }
+}
