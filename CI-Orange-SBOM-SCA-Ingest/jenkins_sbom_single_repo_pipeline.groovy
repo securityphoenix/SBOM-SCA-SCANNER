@@ -252,7 +252,7 @@ pipeline {
                                 echo "WARNING: $DEPSCAN_VDB_VOLUME holds only ${vdb_bytes:-0} bytes of extracted database." >&2
                                 echo "WARNING: dep-scan will download the full vulnerability database during this build," >&2
                                 echo "WARNING: which is slow and fails on any connection drop. Warm it first with:" >&2
-                                echo "WARNING:   Utils/SBOM-SCA-CONTAINER-PIPELINE/sbom-single-repo/depscan_vdb_warm.sh app" >&2
+                                echo "WARNING:   Utils/SBOM-SCA-CONTAINER-PIPELINE/CI-Orange-SBOM-SCA-Ingest/depscan_vdb_warm.sh app" >&2
                             else
                                 echo "dep-scan VDB cache present (${vdb_bytes} bytes)"
                             fi
@@ -354,7 +354,7 @@ pipeline {
                     def upload = {
                         sh '''#!/usr/bin/env bash
                     set -euo pipefail
-                    cd "Utils/SBOM-SCA-CONTAINER-PIPELINE/sbom-single-repo"
+                    cd "Utils/SBOM-SCA-CONTAINER-PIPELINE/CI-Orange-SBOM-SCA-Ingest"
 
                     # The importer needs `requests`. Agents differ: some already have it, and a
                     # modern Debian/Ubuntu python refuses a plain `pip install` outright with

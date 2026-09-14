@@ -15,7 +15,7 @@ pipelines:
           # $UTILS_REPO_URL and $PHOENIX_UTILS_TOKEN are repository variables; for a public
           # mirror the token can be omitted.
           - git clone --depth 1 "${UTILS_REPO_URL:-https://github.com/securityphoenix/Utils-PUB.git}" .phoenix-utils
-          - export IMPORTER_DIR=".phoenix-utils/sbom-single-repo"
+          - export IMPORTER_DIR=".phoenix-utils/CI-Orange-SBOM-SCA-Ingest"
           - pip install -r "$IMPORTER_DIR/requirements.txt"
           - docker run --rm -v "$BITBUCKET_CLONE_DIR:/workspace" aquasec/trivy:0.74.0 fs --scanners vuln /workspace --format cyclonedx --output /workspace/sbom.cdx.json
           - python3 "$IMPORTER_DIR/sbom_sca_single_repo_to_phoenix.py" --sbom-file sbom.cdx.json --file-path package-lock.json --from-bitbucket-env --import-type merge

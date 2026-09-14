@@ -1,4 +1,4 @@
-# sbom-single-repo
+# CI-Orange-SBOM-SCA-Ingest (sbom-single-repo)
 
 Single-repo SCA utility for importing CycloneDX SBOM findings into Phoenix.
 
@@ -189,10 +189,10 @@ Phoenix accepts CI results two different ways, and this utility supports both. P
 
 | | `--method sbom` | `--method vulnerability` |
 | --- | --- | --- |
-| Endpoint | `POST /v1/import/assets/file/translate` | `POST /v1/import/assets` |
+| Endpoint | `POST /v1/import/sboms` (or the legacy `POST /v1/import/assets/file/translate` when `--scan-type` is set — see below) | `POST /v1/import/assets` |
 | Body | multipart: the SBOM file itself | JSON: parsed findings |
-| scanType | `PhxSbomSca:<projectType>` | n/a |
-| Who finds the vulnerabilities | **Phoenix**, by running dep-scan over the uploaded SBOM | **the pipeline**, before upload |
+| scanType | fixed server-side to `PhxSbomSca:sbom` | n/a |
+| Who finds the vulnerabilities | **Phoenix**: uses vulnerabilities already in the file, and only runs dep-scan when it has none (`depscanPolicy=MISSING_VULNS`) | **the pipeline**, before upload |
 | SBOM must contain vulnerabilities | No - an inventory SBOM is enough | Yes |
 | Result | asynchronous; poll with `--wait` | synchronous |
 | Jenkins/Actions `auto` picks it for | build files | container images |
@@ -208,18 +208,20 @@ it (`sbom`).
 python3 sbom_sca_single_repo_to_phoenix.py \
   --sbom-file sbom.cdx.json \
   --repo acme/payments --file-path package-lock.json --branch main \
-  --method sbom --project-type auto \
+  --method sbom \
   --import-type merge --wait
 ```
 
-`--project-type` becomes the `PhxSbomSca:` suffix that tells Phoenix's dep-scan service which
-ecosystems to analyse. It reaches dep-scan and nothing else — the scan type handed to the
-translator is rewritten to `CycloneDX Scan` first — so a value dep-scan does not recognise costs
-enrichment *silently*: the import still succeeds, with fewer vulnerabilities than the SBOM could
-have yielded.
+By default this uploads to the stateful `POST /v1/import/sboms` endpoint. `scanType` is
+fixed server-side to `PhxSbomSca:sbom` and is not something this tool can set - `--project-type`
+has no effect here (the script warns if it is passed without `--scan-type`). Whether Phoenix
+runs dep-scan is decided purely by the file's own content: a vulnerability-enriched SBOM is
+imported as-is, an inventory-only one is analysed with dep-scan. `--project-type` and the
+package-URL-based ecosystem detection below only matter for the legacy translate path, i.e.
+together with `--scan-type`.
 
-The default `auto` reads the ecosystems out of the BOM's package URLs, so the value describes what
-was actually resolved rather than what someone typed once:
+The default `auto` (legacy translate path only) reads the ecosystems out of the BOM's package
+URLs, so the value describes what was actually resolved rather than what someone typed once:
 
 | BOM | Detected |
 | --- | --- |
@@ -233,11 +235,13 @@ a single `PROJECT_TYPE` in the CI templates feeds both. Unrecognised tokens are 
 warning rather than forwarded. Phoenix applies the same mapping server-side; the client does it too
 so the build log shows it.
 
-#### Importing a report that already has vulnerabilities
+#### Importing a non-CycloneDX report, or one Phoenix should translate rather than re-scan
 
-`PhxSbomSca:` asks Phoenix to *derive* vulnerabilities from the component list, so it ignores
-any the report already carries. To have Phoenix translate those instead, name the report
-format with `--scan-type`:
+The stateful endpoint above always expects CycloneDX and derives vulnerabilities from the file's
+own content, which already covers "an enriched CycloneDX SBOM" without any extra flag. What it
+cannot do is accept a report in another format (a native Trivy JSON, ...) or route to one of
+Phoenix's format-specific translators. For that, fall back to the legacy translate endpoint by
+naming the report format with `--scan-type`:
 
 ```bash
 # an enriched CycloneDX SBOM - findings translated, not re-derived
@@ -287,7 +291,14 @@ CycloneDX. Without it, the CycloneDX check applies exactly as before.
 The upload returns immediately with a request id. `--wait` polls
 `GET /v1/import/assets/file/translate/request/{id}` until the status reaches `IMPORTED`, and
 fails the build on `ERROR`; without it the script returns as soon as the file is accepted.
-`--no-auto-import` stages the translation for review instead of importing it.
+`--no-auto-import` stages the translation for review instead of importing it, settling at
+`READY_FOR_IMPORT` rather than `IMPORTED`.
+
+This is all specific to the legacy translate path (`--scan-type`). The default stateful path
+(`POST /v1/import/sboms`) always sets `autoImport=true` server-side, so `--no-auto-import`
+has no effect there (the script warns rather than silently ignoring it) - use `--scan-type` if
+you need a staged review. `--wait` still works on the stateful path: it polls
+`GET /v1/import/sboms/{id}` and only `IMPORTED` counts as done.
 
 **Known server-side limitation: concurrent uploads collide.** Measured against a live tenant,
 `PhxSbomSca` translate requests submitted close together do not all complete. Three *identical*
@@ -341,7 +352,7 @@ components but no vulnerabilities, the script warns rather than silently importi
 
 ```bash
 # from repo root
-cd Utils/SBOM-SCA-CONTAINER-PIPELINE/sbom-single-repo
+cd Utils/SBOM-SCA-CONTAINER-PIPELINE/CI-Orange-SBOM-SCA-Ingest
 python3 -m pip install -r requirements.txt
 
 # import one SBOM (credentials resolved as described below)
@@ -532,14 +543,16 @@ the repository name by hand.
 | Option | Default | Applies to | Purpose |
 | --- | --- | --- | --- |
 | `--method sbom\|vulnerability` | `vulnerability` | both | Which Phoenix API to use. See [Import methods](#import-methods). |
-| `--project-type NAME` | `auto` | sbom | Becomes the `PhxSbomSca:<projectType>` scan type. `auto` reads it from the BOM; otherwise `universal`, `java`, `npm`, `python`, `go`, … or a comma-separated list. cdxgen spellings (`js`, `nodejs`) are mapped onto Phoenix's (`npm`) |
+| `--scan-type VALUE` | unset | sbom | Names a report format from Phoenix's scanType catalogue and switches to the legacy translate endpoint. Required for a non-CycloneDX report; unnecessary for a CycloneDX SBOM, enriched or not. |
+| `--project-type NAME` | `auto` | sbom, only with `--scan-type` | Becomes the `PhxSbomSca:<projectType>` scan type on the legacy translate path. `auto` reads it from the BOM; otherwise `universal`, `java`, `npm`, `python`, `go`, … or a comma-separated list. cdxgen spellings (`js`, `nodejs`) are mapped onto Phoenix's (`npm`). Has no effect on the default stateful endpoint (warns if passed without `--scan-type`). |
 | `--scan-target VALUE` | the `--file-path` value | sbom | What the import records as the thing scanned. Useful for an image reference. |
-| `--no-auto-import` | off | sbom | Stage the translation for review instead of importing it. The request settles at `READY_FOR_IMPORT`. |
-| `--wait` | off | sbom | Poll until the request finishes. With `--no-auto-import`, `READY_FOR_IMPORT` counts as finished. |
-| `--import-type new\|merge\|delta` | `merge` | both | `merge` keeps findings this scan did not see; `delta` closes them; `new` replaces. |
+| `--idempotency-key VALUE` | unset | sbom, stateful endpoint only | Sent as `Idempotency-Key`. Reusing it on a retry returns the existing request instead of creating a new one. No effect with `--scan-type` (legacy translate endpoint). |
+| `--no-auto-import` | off | sbom, only with `--scan-type` | Stage the translation for review instead of importing it. The request settles at `READY_FOR_IMPORT`. On the default stateful endpoint this has no effect - `autoImport` is always `true` there - and the script warns. |
+| `--wait` | off | sbom | Poll until the request finishes. On the legacy translate path, `READY_FOR_IMPORT` also counts as finished when combined with `--no-auto-import`; on the default stateful endpoint only `IMPORTED` does. |
+| `--import-type new\|merge\|delta` | `merge` | both | `merge` keeps findings this scan did not see; `delta` closes them; `new` replaces. On the stateful endpoint this is a compatibility field Phoenix otherwise defaults to `new` itself, so it is only sent when passed explicitly. |
 | `--assessment-name NAME` | `single-repo-sca-sbom` | both | Assessment the import is recorded under. |
 
-`--wait` and `--no-auto-import` describe the asynchronous translate request, so passing either
+`--wait` and `--no-auto-import` describe the asynchronous request, so passing either
 with `--method vulnerability` is rejected rather than silently ignored.
 
 ### Artefact identity (sbom method)
@@ -648,13 +661,13 @@ Secrets: `PHOENIX_CLIENT_ID` and `PHOENIX_CLIENT_SECRET`. The tenant URL comes f
 
 | Goal | Options |
 | --- | --- |
-| Inventory a repository, let Phoenix analyse it | `--method sbom` with a cdxgen or plain-Trivy SBOM; leave `--project-type` at `auto` |
+| Inventory a repository, let Phoenix analyse it | `--method sbom` with a cdxgen or plain-Trivy SBOM (no `--scan-type` needed; `--project-type` is unused on this path) |
 | Inventory a container image the same way | `--method sbom --scan-target <image>`, SBOM from `trivy image` with no `--scanners vuln`. Detection returns `universal`, and the import lands on a **BUILD** asset |
 | Give a container image a CONTAINER asset | `--method sbom --scan-type 'Trivy Scan'` with `trivy image --format json`. The derived `PhxSbomSca:` type cannot do this — it is rewritten to `CycloneDX Scan` before translation |
 | Scan locally and send findings | `--method vulnerability`, SBOM from `trivy … --scanners vuln` |
 | Close findings that are no longer present | add `--import-type delta` |
 | Block the build until the import lands | `--method sbom --wait` (expect minutes, and see the concurrency note above) |
-| Stage an import for review | `--method sbom --no-auto-import` (add `--wait` to confirm it reached `READY_FOR_IMPORT`) |
+| Stage an import for review | `--method sbom --scan-type 'CycloneDX Scan' --no-auto-import` (add `--wait` to confirm it reached `READY_FOR_IMPORT`) - the default stateful endpoint always auto-imports |
 | Check identity and counts without uploading | `--dry-run --payload-out payload.json` |
 
 ### Request size limits
@@ -1015,7 +1028,7 @@ This utility is part of the broader `Utils/` ecosystem. Use this map as a quick 
 | `report-asset_and_vulnerability_report/` | Combined asset + vulnerability report generation |
 | `report-dashboard/` | Executive dashboard/report generation (PDF/Excel) |
 | `report-vulnerability_report/` | Vulnerability-centric report generator |
-| `SBOM-SCA-CONTAINER-PIPELINE/` | SBOM/SCA and container scanning pipeline utilities (includes this `sbom-single-repo` tool) |
+| `SBOM-SCA-CONTAINER-PIPELINE/` | SBOM/SCA and container scanning pipeline utilities (includes this `CI-Orange-SBOM-SCA-Ingest` tool) |
 | `technology-determination/` | Technology stack detection/classification using NVD/CPE mappings |
 
 ## Linked documentation (start here)

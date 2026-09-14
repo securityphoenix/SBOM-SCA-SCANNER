@@ -2,8 +2,10 @@
 Phoenix API transport for the single-repo SBOM importer.
 
 Holds the resolved configuration and every HTTP call: token exchange, the JSON asset import
-(/v1/import/assets) used by the vulnerability method, and the multipart SBOM upload plus status
-polling (/v1/import/assets/file/translate) used by the sbom method.
+(/v1/import/assets) used by the vulnerability method, the stateful SBOM import plus status
+polling (/v1/import/sboms) used by the sbom method by default, and the legacy multipart
+translate upload (/v1/import/assets/file/translate) kept only for --scan-type, which the
+stateful endpoint does not support.
 """
 
 import json
@@ -331,6 +333,112 @@ def upload_sbom_file(
     if response.status_code not in (200, 201):
         raise RuntimeError(f"SBOM upload failed: HTTP {response.status_code} - {response.text[:500]}")
     return response.json() if response.text.strip() else {}
+
+
+def create_sbom_import(
+    cfg: PhoenixConfig,
+    session: requests.Session,
+    token: str,
+    sbom_path: str,
+    repository: Optional[str] = None,
+    scan_target: Optional[str] = None,
+    assessment_name: Optional[str] = None,
+    import_type: Optional[str] = None,
+    artefact_fields: Optional[Dict[str, str]] = None,
+    idempotency_key: Optional[str] = None,
+) -> Dict:
+    """
+    Queue an SBOM on the stateful import endpoint (POST /v1/import/sboms).
+
+    scanType is fixed server-side to "PhxSbomSca:sbom" and cannot be set from here - Phoenix
+    always treats the upload as CycloneDX. depscan only runs when the file itself carries no
+    vulnerabilities (depscanPolicy=MISSING_VULNS is likewise fixed), so an SBOM the scanner
+    already enriched is imported as-is instead of being re-derived. importType is a
+    compatibility field the endpoint defaults to "new" itself; only send it when the caller
+    asked for something explicit; a config-file default meant for the other methods should not
+    leak in here.
+    """
+    url = f"{cfg.api_base_url}/v1/import/sboms"
+    data: Dict[str, str] = {}
+    if import_type:
+        data["importType"] = import_type
+    if assessment_name:
+        data["assessmentName"] = assessment_name
+    if scan_target:
+        data["scanTarget"] = scan_target
+    if repository:
+        data["repository"] = repository
+    if artefact_fields:
+        data.update(artefact_fields)
+
+    headers = {"Authorization": f"Bearer {token}"}
+    if idempotency_key:
+        headers["Idempotency-Key"] = idempotency_key
+
+    with open(sbom_path, "rb") as handle:
+        files = {"file": (os.path.basename(sbom_path), handle, "application/json")}
+        response = session.post(
+            url,
+            headers=headers,
+            data=data,
+            files=files,
+            timeout=cfg.timeout_seconds,
+            verify=cfg.verify_tls,
+        )
+
+    if response.status_code not in (200, 201):
+        raise RuntimeError(f"SBOM import failed: HTTP {response.status_code} - {response.text[:500]}")
+    return response.json() if response.text.strip() else {}
+
+
+# Terminal states returned by GET /v1/import/sboms/{id}
+SBOM_IMPORT_DONE_STATES = {"IMPORTED"}
+SBOM_IMPORT_ERROR_STATES = {"ERROR"}
+
+
+def get_sbom_import_status(cfg: PhoenixConfig, session: requests.Session, token: str, request_id: str) -> Dict:
+    url = f"{cfg.api_base_url}/v1/import/sboms/{request_id}"
+    response = session.get(
+        url,
+        headers={"Authorization": f"Bearer {token}"},
+        timeout=cfg.timeout_seconds,
+        verify=cfg.verify_tls,
+    )
+    if response.status_code != 200:
+        raise RuntimeError(f"Status request failed: HTTP {response.status_code} - {response.text[:300]}")
+    return response.json() if response.text.strip() else {}
+
+
+def wait_for_sbom_import(cfg: PhoenixConfig, session: requests.Session, token: str, request_id: str) -> Dict:
+    """
+    Poll a stateful SBOM import request until it settles, errors, or the poll timeout elapses.
+
+    Unlike the legacy translate request, autoImport is always true here, so there is no
+    READY_FOR_IMPORT resting state to wait for - only IMPORTED counts as done.
+    """
+    deadline = time.time() + cfg.poll_timeout_seconds
+    last_status = ""
+
+    while True:
+        payload = get_sbom_import_status(cfg, session, token, request_id)
+        status = str(payload.get("status", "")).upper()
+        if status != last_status:
+            print(f"Import status: {status or 'UNKNOWN'}", flush=True)
+            last_status = status
+
+        if status in SBOM_IMPORT_DONE_STATES:
+            return payload
+        if status in SBOM_IMPORT_ERROR_STATES:
+            raise RuntimeError(f"Import failed: {payload.get('error') or 'no error detail returned'}")
+
+        if time.time() >= deadline:
+            raise RuntimeError(
+                f"Timed out after {cfg.poll_timeout_seconds}s waiting for request {request_id} "
+                f"(last status: {status or 'UNKNOWN'}). The upload was accepted and Phoenix is "
+                f"still processing it server-side, so it may yet import - check it at "
+                f"{cfg.api_base_url}/v1/import/sboms/{request_id}."
+            )
+        time.sleep(cfg.poll_interval_seconds)
 
 
 def get_translate_status(cfg: PhoenixConfig, session: requests.Session, token: str, request_id: str) -> Dict:
