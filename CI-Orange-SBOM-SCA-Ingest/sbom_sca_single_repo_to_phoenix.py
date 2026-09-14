@@ -10,11 +10,12 @@ vulnerability (POST /v1/import/assets)
     when the scanner already did the vulnerability analysis (Trivy with --scanners
     vuln, a dep-scan VDR, Grype, ...).
 
-sbom (POST /v1/import/assets/file/translate)
-    Uploads a plain SBOM as a multipart file with scanType "PhxSbomSca:<projectType>".
-    Phoenix runs its own dep-scan service over the SBOM to derive vulnerabilities, then
-    translates and imports the result. Use this when the pipeline only produces an
-    inventory SBOM and you want Phoenix to do the vulnerability analysis.
+sbom (POST /v1/import/sboms by default; POST /v1/import/assets/file/translate with --scan-type)
+    Uploads the SBOM file itself. By default Phoenix uses the vulnerabilities already in the
+    file and only runs dep-scan when it has none (scanType is fixed server-side to
+    "PhxSbomSca:sbom"). Pass --scan-type to route a non-CycloneDX report, or one Phoenix
+    should translate through a specific format translator, through the legacy endpoint
+    instead.
 
 Supporting modules live alongside this file and must be deployed with it:
     phoenix_client.py   configuration and every HTTP call
@@ -40,9 +41,11 @@ from phoenix_client import (
     build_artefact_fields,
     PhoenixConfig,
     build_session,
+    create_sbom_import,
     get_access_token,
     import_assets,
     upload_sbom_file,
+    wait_for_sbom_import,
     wait_for_translate,
 )
 
@@ -102,6 +105,14 @@ def parse_args() -> argparse.Namespace:
         ),
     )
     parser.add_argument("--scan-target", help="Scan target recorded on the import (sbom method)")
+    parser.add_argument(
+        "--idempotency-key",
+        help=(
+            "sbom method, stateful endpoint only (no --scan-type): sent as the Idempotency-Key "
+            "header. Reusing the same value on a retry returns the existing import request for "
+            "the organization instead of creating a new one."
+        ),
+    )
     parser.add_argument(
         "--artefact-type",
         choices=["BUILD_FILE", "CONTAINER"],
@@ -181,6 +192,18 @@ def load_config(config_file: str, args: argparse.Namespace, require_credentials:
         print(
             f"Warning: --scan-type {scan_type!r} replaces the derived "
             f"'PhxSbomSca:{project_type}', so project_type has no effect on this run.",
+            file=sys.stderr,
+            flush=True,
+        )
+    # Without --scan-type, sbom-method uploads now go to the stateful endpoint
+    # (POST /v1/import/sboms), which fixes scanType to "PhxSbomSca:sbom" server-side -
+    # project_type has no consumer left on that path.
+    elif method == "sbom" and not scan_type and (args.project_type or phoenix_section.get("project_type")):
+        print(
+            "Warning: --project-type has no effect on the stateful sbom-method endpoint "
+            "(POST /v1/import/sboms), which fixes scanType to 'PhxSbomSca:sbom' server-side. "
+            "It only applies together with --scan-type, which routes to the legacy translate "
+            "endpoint instead.",
             file=sys.stderr,
             flush=True,
         )
@@ -297,18 +320,94 @@ def run_sbom_upload(cfg: PhoenixConfig, args: argparse.Namespace, sbom: dict, co
     """
     Upload the report file itself and let Phoenix process it server-side.
 
-    Nothing is parsed out of the file here. Which of the two things Phoenix then does with it
-    is decided by the scan type: the default dep-scan route derives vulnerabilities from the
-    components, so an inventory-only SBOM is the expected input; an explicit --scan-type
-    routes it to a translator, which reads the findings the report already carries.
+    An explicit --scan-type names a report format ("Trivy Scan", ...) other than plain
+    CycloneDX, which only the legacy translate endpoint can accept - the stateful endpoint
+    fixes scanType to "PhxSbomSca:sbom" and always expects CycloneDX. Everything else goes to
+    the stateful endpoint, which is now the default: it uses vulnerabilities already in the
+    file and only falls back to dep-scan when the file has none, so a scanner-enriched SBOM no
+    longer needs a separate --method vulnerability run.
     """
-    # Resolved here rather than in load_config because detection reads the BOM. An explicit
-    # --scan-type retires the project type entirely, so do not spend the work or the warning.
-    project_type = cfg.project_type if cfg.scan_type else resolve_project_type(cfg.project_type, sbom)
-    scan_type = cfg.scan_type or f"PhxSbomSca:{project_type}"
+    if cfg.scan_type:
+        return run_sbom_upload_translate(cfg, args, sbom, context)
+    return run_sbom_upload_stateful(cfg, args, sbom, context)
+
+
+def run_sbom_upload_stateful(cfg: PhoenixConfig, args: argparse.Namespace, sbom: dict, context: dict) -> int:
+    """Upload to POST /v1/import/sboms - the default, queue-backed sbom-method path."""
+    vuln_count = len(sbom.get("vulnerabilities", []))
+    if vuln_count:
+        analysis = f"Phoenix will import the {vuln_count} vulnerabilities already in the file"
+    else:
+        analysis = "Phoenix will run dep-scan (the file has no vulnerabilities of its own)"
+    print(
+        f"Method: sbom upload (stateful) | components={len(sbom.get('components', []))}, "
+        f"vulnerabilities-in-file={vuln_count} ({analysis})",
+        flush=True,
+    )
+    print(f"repository={context['repo']}", flush=True)
+
+    # Resolved before the dry-run exit: a dry run exists to catch bad input without calling
+    # the API, so invalid artefact options must still fail here, and the identity derived from
+    # the BOM is exactly what a dry run is meant to show.
+    artefact_fields = resolve_artefact_fields(args, sbom)
+    if artefact_fields:
+        print("Artefact: " + ", ".join(f"{k}={v}" for k, v in sorted(artefact_fields.items())), flush=True)
+
+    if args.no_auto_import:
+        print(
+            "Warning: --no-auto-import has no effect here - the stateful endpoint always sets "
+            "autoImport=true. Add --scan-type to route through the translate endpoint instead "
+            "if you need a staged review.",
+            file=sys.stderr,
+            flush=True,
+        )
+
+    if args.dry_run:
+        print("Dry-run enabled: no API call was made.", flush=True)
+        return 0
+
+    session = build_session()
+    token = get_access_token(cfg, session)
+    result = create_sbom_import(
+        cfg=cfg,
+        session=session,
+        token=token,
+        sbom_path=args.sbom_file,
+        repository=context["repo"],
+        scan_target=args.scan_target or context["file_path"],
+        assessment_name=cfg.assessment_name,
+        import_type=args.import_type,
+        artefact_fields=artefact_fields,
+        idempotency_key=args.idempotency_key,
+    )
+    request_id = result.get("id")
+    print(f"SBOM import request queued (status={result.get('status', 'UNKNOWN')}).", flush=True)
+    print(json.dumps(result, indent=2)[:1000], flush=True)
+
+    if cfg.wait_for_completion:
+        if not request_id:
+            raise RuntimeError("Cannot wait for completion: no request id returned by Phoenix")
+        final = wait_for_sbom_import(cfg, session, token, request_id)
+        print("Import completed.", flush=True)
+        print(json.dumps(final, indent=2)[:1000], flush=True)
+    return 0
+
+
+def run_sbom_upload_translate(cfg: PhoenixConfig, args: argparse.Namespace, sbom: dict, context: dict) -> int:
+    """
+    Upload to POST /v1/import/assets/file/translate - kept only for --scan-type.
+
+    This is the one thing the stateful endpoint cannot do: import a report in a format other
+    than plain CycloneDX (a native Trivy JSON, ...) by naming its scanType explicitly so Phoenix
+    translates the findings it already carries instead of running dep-scan over it.
+    """
+    # cfg.scan_type is set on every path that reaches this function, so project_type is never
+    # spent or warned about here.
+    project_type = cfg.project_type
+    scan_type = cfg.scan_type
     contents, analysis = describe_report(sbom, cfg.scan_type, args.sbom_file, scan_type)
 
-    print(f"Method: sbom upload | {contents} ({analysis})", flush=True)
+    print(f"Method: sbom upload (translate) | {contents} ({analysis})", flush=True)
     print(f"scanType={scan_type}, importType={cfg.import_type}, repository={context['repo']}", flush=True)
 
     # Resolved before the dry-run exit: a dry run exists to catch bad input without calling

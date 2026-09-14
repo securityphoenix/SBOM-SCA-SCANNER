@@ -1,10 +1,10 @@
-# sbom-single-repo — Quick Start
+# CI-Orange-SBOM-SCA-Ingest — Quick Start
 
 ## 1) Move to utility folder and install dependencies
 
 ```bash
 # from repository root
-cd Utils/SBOM-SCA-CONTAINER-PIPELINE/sbom-single-repo
+cd Utils/SBOM-SCA-CONTAINER-PIPELINE/CI-Orange-SBOM-SCA-Ingest
 python3 -m pip install -r requirements.txt
 ```
 

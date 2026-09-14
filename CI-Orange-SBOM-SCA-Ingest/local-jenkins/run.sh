@@ -103,14 +103,14 @@ if [ "${1:-}" != "--trigger" ]; then
     docker build -q -t "$APP_IMAGE" "$APPCTX" >/dev/null
 
     echo "==> Assembling the seed repository"
-    rm -rf "$SEED"; mkdir -p "$SEED/Utils/SBOM-SCA-CONTAINER-PIPELINE/sbom-single-repo" "$SEED/app"
+    rm -rf "$SEED"; mkdir -p "$SEED/Utils/SBOM-SCA-CONTAINER-PIPELINE/CI-Orange-SBOM-SCA-Ingest" "$SEED/app"
     cp "$HERE/fixture/index.js" "$SEED/"
     cp "$HERE/fixture/Dockerfile.app" "$SEED/Dockerfile"
     for d in "$SEED" "$SEED/app"; do
         cp "$HERE/fixture/package.json.fixture" "$d/package.json"
         cp "$HERE/fixture/package-lock.json.fixture" "$d/package-lock.json"
     done
-    cp "$SRC"/*.py "$SRC/requirements.txt" "$SEED/Utils/SBOM-SCA-CONTAINER-PIPELINE/sbom-single-repo/"
+    cp "$SRC"/*.py "$SRC/requirements.txt" "$SEED/Utils/SBOM-SCA-CONTAINER-PIPELINE/CI-Orange-SBOM-SCA-Ingest/"
     cp "$SRC/jenkins_sbom_single_repo_pipeline.groovy" "$SEED/Jenkinsfile"
     ( cd "$SEED" && git init -q && git symbolic-ref HEAD refs/heads/main \
         && git config user.email "local@example.invalid" && git config user.name "local-jenkins" \

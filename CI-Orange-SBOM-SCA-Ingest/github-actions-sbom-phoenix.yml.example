@@ -317,7 +317,7 @@ jobs:
           token: ${{ secrets.PHOENIX_UTILS_TOKEN || github.token }}
 
       - name: Install importer dependencies
-        run: python3 -m pip install --disable-pip-version-check -r .phoenix-utils/Utils/SBOM-SCA-CONTAINER-PIPELINE/sbom-single-repo/requirements.txt
+        run: python3 -m pip install --disable-pip-version-check -r .phoenix-utils/Utils/SBOM-SCA-CONTAINER-PIPELINE/CI-Orange-SBOM-SCA-Ingest/requirements.txt
 
       - name: Send to Phoenix
         env:
@@ -334,7 +334,7 @@ jobs:
           wait_flag=""
           if [ "$METHOD" = "sbom" ] && [ "$WAIT" = "true" ]; then wait_flag="--wait"; fi
 
-          python3 .phoenix-utils/Utils/SBOM-SCA-CONTAINER-PIPELINE/sbom-single-repo/sbom_sca_single_repo_to_phoenix.py \
+          python3 .phoenix-utils/Utils/SBOM-SCA-CONTAINER-PIPELINE/CI-Orange-SBOM-SCA-Ingest/sbom_sca_single_repo_to_phoenix.py \
             --sbom-file "$SBOM_FILE" \
             --file-path "$FILE_PATH" \
             --import-type "$IMPORT_TYPE" \
