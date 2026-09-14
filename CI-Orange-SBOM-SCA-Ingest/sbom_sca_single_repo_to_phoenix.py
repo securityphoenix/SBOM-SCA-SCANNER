@@ -376,7 +376,7 @@ def run_sbom_upload_stateful(cfg: PhoenixConfig, args: argparse.Namespace, sbom:
         repository=context["repo"],
         scan_target=args.scan_target or context["file_path"],
         assessment_name=cfg.assessment_name,
-        import_type=args.import_type,
+        import_type=cfg.import_type,
         artefact_fields=artefact_fields,
         idempotency_key=args.idempotency_key,
     )
