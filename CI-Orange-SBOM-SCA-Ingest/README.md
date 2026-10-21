@@ -348,6 +348,12 @@ python3 sbom_sca_single_repo_to_phoenix.py \
 This is the default, and the behaviour described in the rest of this document. If the SBOM has
 components but no vulnerabilities, the script warns rather than silently importing zero findings.
 
+Each finding carries a `packages` list - one entry per affected component with a name and a
+version - which is what Phoenix turns into package remedies. Fix versions are taken from
+`affects[].versions` entries marked `unaffected`, or from the `recommendation` text when the
+vulnerability affects a single component; without either, Phoenix records the remedy as
+`latest`. The "Prepared payload" log line reports `with_packages` and `with_fix_versions`.
+
 ## Step 2 - import the SBOM into Phoenix
 
 ```bash

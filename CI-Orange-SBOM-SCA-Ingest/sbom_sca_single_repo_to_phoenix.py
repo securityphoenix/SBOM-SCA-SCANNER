@@ -462,8 +462,18 @@ def run_vulnerability_import(cfg: PhoenixConfig, args: argparse.Namespace, sbom:
             json.dump(payload, handle, indent=2)
 
     assets_count = len(payload.get("assets", []))
-    findings_count = len(payload["assets"][0].get("findings", [])) if assets_count else 0
-    print(f"Prepared payload: assets={assets_count}, findings={findings_count}", flush=True)
+    findings = payload["assets"][0].get("findings", []) if assets_count else []
+    findings_count = len(findings)
+    # Package remedies in Phoenix come only from finding.packages, so this is the remedy coverage.
+    with_packages = sum(1 for f in findings if f.get("packages"))
+    with_fix_versions = sum(
+        1 for f in findings if any(p.get("fixVersions") for p in f.get("packages", []))
+    )
+    print(
+        f"Prepared payload: assets={assets_count}, findings={findings_count}, "
+        f"with_packages={with_packages}, with_fix_versions={with_fix_versions}",
+        flush=True,
+    )
 
     if findings_count == 0 and sbom.get("components"):
         print(

@@ -105,6 +105,27 @@ def build_component_maps(sbom: Dict) -> Tuple[Dict[str, str], List[Dict[str, str
     return ref_to_name, installed_software
 
 
+def build_ref_to_component(sbom: Dict) -> Dict[str, Dict]:
+    """
+    Map every bom-ref to its raw component, nested components included.
+
+    CycloneDX allows components inside components (an assembly and its parts), and a
+    vulnerability's affects[].ref may point at any of them. build_component_maps only reads the
+    top level and is left as it is, so installedSoftware does not change shape.
+    """
+    out: Dict[str, Dict] = {}
+    stack = list(sbom.get("components") or [])
+    while stack:
+        comp = stack.pop()
+        if not isinstance(comp, dict):
+            continue
+        ref = comp.get("bom-ref")
+        if ref and ref not in out:
+            out[ref] = comp
+        stack.extend(comp.get("components") or [])
+    return out
+
+
 # effected.sub_component is varchar(1024); anything longer fails the import outright.
 LOCATION_MAX_LENGTH = 1024
 # Affected component refs shown inline in `location`; the rest are summarised as "(+N more)".
@@ -236,7 +257,83 @@ def _format_location(affected_components: List[str], fallback: str) -> str:
     return affected_components[0][: max(0, LOCATION_MAX_LENGTH - len(suffix))] + suffix
 
 
-def build_findings(sbom: Dict, ref_to_name: Dict[str, str], asset_key: str) -> List[Dict]:
+# "Upgrade lodash to version 4.17.21", "Update to 2.17.1", "upgrade to v1.2.3". Deliberately narrow:
+# a version is only taken when the text says plainly what to move to.
+RECOMMENDATION_VERSION_RE = re.compile(
+    r"\b(?:upgrade|update)\b[^.;\n]*?\bto\s+(?:version\s+)?v?([0-9][0-9A-Za-z.+_-]*[0-9A-Za-z])",
+    re.IGNORECASE,
+)
+
+
+def _fix_versions(vuln: Dict, affect: Dict, single_component: bool) -> List[str]:
+    """
+    The versions that fix one affected component, or [] when the BOM does not say.
+
+    affects[].versions entries marked "unaffected" are the spec's way of naming a fixed release.
+    Ranges are skipped: Phoenix stores one version per remedy, compared with >=, and a range
+    does not reduce to that. The recommendation text is used only when the vulnerability affects
+    a single component - with several, one sentence cannot be attributed to any of them safely.
+    An empty result is fine: the backend then records the remedy as "latest", which is also what
+    the server-side --method sbom route produces.
+    """
+    versions: List[str] = []
+    for entry in affect.get("versions") or []:
+        if not isinstance(entry, dict):
+            continue
+        version = str(entry.get("version") or "").strip()
+        if version and str(entry.get("status") or "").lower() == "unaffected" and version not in versions:
+            versions.append(version)
+    if versions:
+        return versions
+
+    if single_component:
+        match = RECOMMENDATION_VERSION_RE.search(str(vuln.get("recommendation") or ""))
+        if match:
+            return [match.group(1)]
+    return []
+
+
+def build_packages(vuln: Dict, ref_to_component: Dict[str, Dict]) -> List[Dict]:
+    """
+    The finding's `packages`: one entry per affected component, which is what Phoenix turns into
+    PACKAGE_VERSION remedies. Without it a finding gets no package remedy at all - `remedy` text,
+    `location` and `details.affected_components` are never read for that.
+
+    The import validator rejects the whole request when any package lacks a name or a version, so
+    such components are skipped rather than sent. Only the component name is used, matching the
+    server-side translation (CycloneDxImportRequestMapper) so both routes key remedies the same way.
+    No `cpe`: Phoenix stores it as the library's CPE, and a purl there would be wrong.
+    """
+    affects = [a for a in vuln.get("affects") or [] if isinstance(a, dict) and a.get("ref")]
+    single_component = len({a["ref"] for a in affects}) == 1
+
+    packages: List[Dict] = []
+    seen = set()
+    for affect in affects:
+        comp = ref_to_component.get(affect["ref"])
+        if not comp:
+            continue
+        name = str(comp.get("name") or "").strip()
+        version = str(comp.get("version") or "").strip()
+        if not name or not version or (name, version) in seen:
+            continue
+        seen.add((name, version))
+        package = {"name": name, "version": version}
+        fix_versions = _fix_versions(vuln, affect, single_component)
+        if fix_versions:
+            package["fixVersions"] = fix_versions
+        packages.append(package)
+    return packages
+
+
+def build_findings(
+    sbom: Dict,
+    ref_to_name: Dict[str, str],
+    asset_key: str,
+    ref_to_component: Optional[Dict[str, Dict]] = None,
+) -> List[Dict]:
+    if ref_to_component is None:
+        ref_to_component = build_ref_to_component(sbom)
     findings: List[Dict] = []
     for vuln in sbom.get("vulnerabilities", []):
         vuln_id = vuln.get("id", "UNKNOWN")
@@ -280,6 +377,10 @@ def build_findings(sbom: Dict, ref_to_name: Dict[str, str], asset_key: str) -> L
         cwes = parse_cwes(vuln)
         if cwes:
             finding["cwes"] = cwes
+
+        packages = build_packages(vuln, ref_to_component)
+        if packages:
+            finding["packages"] = packages
 
         finding["details"] = {
             "asset_key_mode": "repo/file:branch",
