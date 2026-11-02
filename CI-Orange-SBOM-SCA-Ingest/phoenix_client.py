@@ -35,7 +35,7 @@ GATEWAY_WARN_BYTES = 8 * 1024 * 1024
 # The gateway limit applies to the whole request; leave room for form fields and multipart framing.
 UPLOAD_PART_LIMIT_BYTES = GATEWAY_LIMIT_BYTES - 64 * 1024
 # sbom method: files above this are gzip-compressed before upload. Needs a Phoenix backend with gzip upload support.
-COMPRESS_ABOVE_BYTES = 1024 * 1024
+COMPRESS_ABOVE_BYTES = UPLOAD_PART_LIMIT_BYTES
 RETRY_TOTAL = 4
 RETRY_BACKOFF_FACTOR = 1.5
 
