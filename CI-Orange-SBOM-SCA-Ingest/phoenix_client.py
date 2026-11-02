@@ -8,6 +8,7 @@ translate upload (/v1/import/assets/file/translate) kept only for --scan-type, w
 stateful endpoint does not support.
 """
 
+import gzip
 import json
 import re
 import os
@@ -31,6 +32,10 @@ RETRY_STATUS_CODES = (429, 500, 502, 503, 504)
 # AWS API Gateway HTTP API caps a request payload at 10MB; warn before getting close.
 GATEWAY_LIMIT_BYTES = 10 * 1024 * 1024
 GATEWAY_WARN_BYTES = 8 * 1024 * 1024
+# The gateway limit applies to the whole request; leave room for form fields and multipart framing.
+UPLOAD_PART_LIMIT_BYTES = GATEWAY_LIMIT_BYTES - 64 * 1024
+# sbom method: files above this are gzip-compressed before upload. Needs a Phoenix backend with gzip upload support.
+COMPRESS_ABOVE_BYTES = 1024 * 1024
 RETRY_TOTAL = 4
 RETRY_BACKOFF_FACTOR = 1.5
 
@@ -274,6 +279,44 @@ def build_artefact_fields(
     return fields
 
 
+def _prepare_upload(sbom_path: str, *, compress: bool = True):
+    """
+    Read sbom_path and return (filename, content, content_type) for the multipart `file` part.
+
+    Always returns bytes; there is no file handle to manage. A file within COMPRESS_ABOVE_BYTES is
+    returned unchanged - the multipart body is byte-for-byte what the previous open(...) handle
+    produced. A larger file is gzip-compressed. With compress=False (the --scan-type translate
+    upload) nothing is compressed, and a file over UPLOAD_PART_LIMIT_BYTES is refused before any
+    request instead.
+
+    Reads both limits as module globals rather than default arguments so tests can monkeypatch
+    them per call.
+    """
+    basename = os.path.basename(sbom_path)
+    with open(sbom_path, "rb") as handle:
+        data = handle.read()
+
+    if not compress:
+        if len(data) > UPLOAD_PART_LIMIT_BYTES:
+            raise RuntimeError(
+                f"{basename} is {len(data) / 1_048_576:.1f}MB; --scan-type uploads go through Phoenix's "
+                f"translation service, which accepts at most 10MB. Drop --scan-type to use the SBOM "
+                f"import, which compresses large CycloneDX files, or split the report."
+            )
+        return basename, data, "application/json"
+
+    if len(data) <= COMPRESS_ABOVE_BYTES:
+        return basename, data, "application/json"
+
+    compressed = gzip.compress(data)
+    print(
+        f"Compressed {basename} from {len(data) / 1_048_576:.1f}MB to "
+        f"{len(compressed) / 1_048_576:.1f}MB for upload",
+        flush=True,
+    )
+    return basename + ".gz", compressed, "application/gzip"
+
+
 def upload_sbom_file(
     cfg: PhoenixConfig,
     session: requests.Session,
@@ -319,16 +362,16 @@ def upload_sbom_file(
     if artefact_fields:
         data.update(artefact_fields)
 
-    with open(sbom_path, "rb") as handle:
-        files = {"file": (os.path.basename(sbom_path), handle, "application/json")}
-        response = session.post(
-            url,
-            headers={"Authorization": f"Bearer {token}"},
-            data=data,
-            files=files,
-            timeout=cfg.timeout_seconds,
-            verify=cfg.verify_tls,
-        )
+    filename, content, content_type = _prepare_upload(sbom_path, compress=False)
+    files = {"file": (filename, content, content_type)}
+    response = session.post(
+        url,
+        headers={"Authorization": f"Bearer {token}"},
+        data=data,
+        files=files,
+        timeout=cfg.timeout_seconds,
+        verify=cfg.verify_tls,
+    )
 
     if response.status_code not in (200, 201):
         raise RuntimeError(f"SBOM upload failed: HTTP {response.status_code} - {response.text[:500]}")
@@ -375,16 +418,16 @@ def create_sbom_import(
     if idempotency_key:
         headers["Idempotency-Key"] = idempotency_key
 
-    with open(sbom_path, "rb") as handle:
-        files = {"file": (os.path.basename(sbom_path), handle, "application/json")}
-        response = session.post(
-            url,
-            headers=headers,
-            data=data,
-            files=files,
-            timeout=cfg.timeout_seconds,
-            verify=cfg.verify_tls,
-        )
+    filename, content, content_type = _prepare_upload(sbom_path)
+    files = {"file": (filename, content, content_type)}
+    response = session.post(
+        url,
+        headers=headers,
+        data=data,
+        files=files,
+        timeout=cfg.timeout_seconds,
+        verify=cfg.verify_tls,
+    )
 
     if response.status_code not in (200, 201):
         raise RuntimeError(f"SBOM import failed: HTTP {response.status_code} - {response.text[:500]}")

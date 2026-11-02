@@ -10,6 +10,14 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [v1.1.0] - 2026-10-29
+
+### Added
+
+- `CI-Orange-SBOM-SCA-Ingest/phoenix_client.py` - default `sbom` uploads (stateful
+  `POST /v1/import/sboms`) over 1MB are now gzip-compressed automatically
+  and sent as `<name>.gz`.
+
 ## [v1.0.1] - 2026-09-09
 
 ### Added

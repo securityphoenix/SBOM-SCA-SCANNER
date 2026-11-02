@@ -690,6 +690,9 @@ Two things follow that are easy to get backwards:
   Phoenix does the analysis after upload - the enriched SBOM never crosses the gateway.
 - For the `vulnerability` method, the reverse holds: findings are the whole payload.
 
+With the `sbom` method, files over 1MB are gzip-compressed before upload. `--scan-type` uploads
+are not compressed, and files over 10MB are refused before sending.
+
 The importer warns above 8MB, naming the finding count, and turns a rejection into a message
 that explains it rather than surfacing the gateway's response body. If you hit it, split the scan
 by manifest or sub-project; retrying unchanged will not help.
