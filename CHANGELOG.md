@@ -16,8 +16,8 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   carries the base image name and digest to Phoenix. Pass `--base-image-name` and
   `--base-image-digest` together, or build the image with the
   `org.opencontainers.image.base.name` and `org.opencontainers.image.base.digest` labels and the
-  importer reads them from a Trivy SBOM. Invalid flags exit `1`; invalid labels print a warning
-  and the upload goes ahead without a base image. Needs `--artefact-type CONTAINER`; the
+  importer reads them from a Trivy SBOM. Invalid flags exit `1`; invalid labels, or a label with
+  only one of the pair, print a warning and the upload goes ahead without a base image. Needs `--artefact-type CONTAINER`; the
   `--scan-type` translate route takes no base image. Phoenix stores the values only for
   organisations with the feature switched on.
 

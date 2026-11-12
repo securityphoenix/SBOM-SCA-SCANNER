@@ -67,7 +67,8 @@ python3 sbom_sca_single_repo_to_phoenix.py \
 Container uploads can also send the base image: add `--artefact-type CONTAINER` and either
 `--base-image-name <ref> --base-image-digest sha256:<64 hex>`, or build the image with the
 `org.opencontainers.image.base.name` and `org.opencontainers.image.base.digest` labels and scan
-it with Trivy. See the "Base image" section of `README.md`.
+it with Trivy. Phoenix stores the base image only when your administrator has switched it on for your
+organisation; with it off the upload still works and the fields are ignored. See the "Base image" section of `README.md`.
 
 ## 5) Dry-run and payload preview (recommended first run)
 

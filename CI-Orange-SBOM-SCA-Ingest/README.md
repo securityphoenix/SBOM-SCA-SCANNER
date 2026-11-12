@@ -587,8 +587,9 @@ unconditionally.
 #### Base image
 
 A container upload can carry the image it was built from. Phoenix shows the base image name and
-digest on the container asset, but only when the organisation has the feature switched on. With
-the feature off, Phoenix accepts the upload and ignores the base image.
+digest on the container asset. Phoenix stores the base image only when it is switched on for your
+organisation. It is off by default. Ask your Phoenix administrator to enable it. With it off, the
+upload still works and the base image fields are ignored.
 
 Two ways to supply it, in this order:
 
@@ -606,7 +607,7 @@ Two ways to supply it, in this order:
 
 Rules, checked before the upload:
 
-- Name and digest go together. One without the other is an error.
+- Name and digest go together. With flags, one without the other is an error (exit `1`). With labels, it is a warning and the upload goes ahead without a base image.
 - The digest must be `sha256:` plus 64 hex characters. It is lowercased before it is sent.
 - The name is at most 512 characters. It starts with a letter or digit and holds only letters,
   digits and `. _ / : @ -`.

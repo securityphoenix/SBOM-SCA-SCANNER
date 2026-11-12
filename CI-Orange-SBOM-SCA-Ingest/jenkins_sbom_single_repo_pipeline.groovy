@@ -204,10 +204,11 @@ pipeline {
             }
         }
 
-        // Base image (container builds): to send the base image with a container SBOM, build the image
-        // with the two OCI labels, scan it with Trivy, and add --artefact-type CONTAINER to the importer:
-        //   docker build --label org.opencontainers.image.base.name=<ref> --label org.opencontainers.image.base.digest=<sha256:...> ...
-        // Without --artefact-type the labels are not read. See README.md, section "Base image".
+        // Base image (container builds): the labels reach the SBOM only from a Trivy image scan
+        // (trivy image <ref>), not from trivy fs, which this pipeline runs. To send a base image from here,
+        // pass --artefact-type CONTAINER with --base-image-name and --base-image-digest instead.
+        // If you also build the image, label it: docker build --label org.opencontainers.image.base.name=<ref> --label org.opencontainers.image.base.digest=<sha256:...> ...
+        // See README.md, section "Base image".
         stage('Generate SBOM') {
             steps {
                 sh '''#!/usr/bin/env bash
