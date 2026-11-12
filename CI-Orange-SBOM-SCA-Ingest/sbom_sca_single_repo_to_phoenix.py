@@ -31,6 +31,7 @@ import sys
 
 from ci_context import resolve_repo_context
 from cyclonedx_sbom import (
+    base_image_from_sbom,
     build_payload,
     container_identity_from_sbom,
     read_report,
@@ -39,6 +40,7 @@ from cyclonedx_sbom import (
 from upload_plan import describe_report, resolve_project_type
 from phoenix_client import (
     build_artefact_fields,
+    normalise_base_image,
     PhoenixConfig,
     build_session,
     create_sbom_import,
@@ -126,6 +128,17 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--container-version", help="CONTAINER: image tag")
     parser.add_argument("--container-digest", help="CONTAINER: sha256:<64 hex>; derived from the SBOM when omitted")
     parser.add_argument("--registry", help="CONTAINER: container registry host")
+    parser.add_argument(
+        "--base-image-name",
+        help=(
+            "CONTAINER: base image reference, e.g. registry.example.com/team/base:1.4; "
+            "read from the SBOM labels when omitted"
+        ),
+    )
+    parser.add_argument(
+        "--base-image-digest",
+        help="CONTAINER: base image digest, sha256:<64 hex>; give it with --base-image-name",
+    )
     parser.add_argument(
         "--no-auto-import",
         action="store_true",
@@ -267,16 +280,46 @@ def load_config(config_file: str, args: argparse.Namespace, require_credentials:
     )
 
 
-def resolve_artefact_fields(args: argparse.Namespace, sbom: dict) -> dict:
+def resolve_base_image(args: argparse.Namespace, sbom: dict, read_base: bool):
+    """
+    Return ({"baseImageName", "baseImageDigest"} or {}, source) for a CONTAINER upload.
+
+    A flag is an explicit request: any rule failure raises ValueError (exit 1). A label is a
+    claim: a label that fails a rule prints a warning and no base is sent. source is one of
+    flags, labels, none.
+    """
+    flag_name = (args.base_image_name or "").strip()
+    flag_digest = (args.base_image_digest or "").strip()
+    if flag_name or flag_digest:
+        if not (flag_name and flag_digest):
+            raise ValueError("--base-image-name and --base-image-digest must be given together")
+        fields, reason = normalise_base_image(flag_name, flag_digest)
+        if reason:
+            raise ValueError(f"--base-image-name/--base-image-digest: {reason}")
+        return fields, "flags"
+    if not read_base:
+        return {}, "none"
+    fields, reason = base_image_from_sbom(sbom)
+    if reason:
+        print(f"Warning: {reason}; uploading without a base image", file=sys.stderr, flush=True)
+    return (fields, "labels") if fields else ({}, "none")
+
+
+def resolve_artefact_fields(args: argparse.Namespace, sbom: dict, *, read_base: bool = True):
     """
     Build the artefact parameters, filling container details from the BOM where not given.
 
     A container BOM already carries image name, tag and digest in metadata.component, so a
     pipeline that knows it is scanning an image need not restate them. Explicit flags always
-    win. Returns {} when --artefact-type is unset, reproducing the previous behaviour exactly.
+    win. Returns ({}, "no-artefact-type") when --artefact-type is unset, reproducing the
+    previous behaviour exactly. Otherwise returns (fields, base_source), base_source being one of
+    flags, labels, none. Base labels are read only for CONTAINER and only with read_base=True.
     """
+    has_base_flags = bool((args.base_image_name or "").strip() or (args.base_image_digest or "").strip())
+    if args.artefact_type != "CONTAINER" and has_base_flags:
+        raise ValueError("--base-image-name/--base-image-digest need --artefact-type CONTAINER")
     if not args.artefact_type:
-        return {}
+        return {}, "no-artefact-type"
 
     name = args.container_name
     version = args.container_version
@@ -290,18 +333,25 @@ def resolve_artefact_fields(args: argparse.Namespace, sbom: dict) -> dict:
         digest = digest or derived.get("digest")
         registry = registry or derived.get("registry")
 
+    base_fields, base_source = {}, "none"
+    if args.artefact_type == "CONTAINER":
+        base_fields, base_source = resolve_base_image(args, sbom, read_base)
+
     build_file = args.build_file
     if args.artefact_type == "BUILD_FILE" and not build_file:
         build_file = args.file_path
 
-    return build_artefact_fields(
+    fields = build_artefact_fields(
         artefact_type=args.artefact_type,
         build_file=build_file,
         container_name=name,
         container_version=version,
         container_digest=digest,
         registry=registry,
+        base_image_name=base_fields.get("baseImageName"),
+        base_image_digest=base_fields.get("baseImageDigest"),
     )
+    return fields, base_source
 
 
 def _await_translation(cfg: PhoenixConfig, args: argparse.Namespace, session, token, request_id) -> None:
@@ -349,9 +399,13 @@ def run_sbom_upload_stateful(cfg: PhoenixConfig, args: argparse.Namespace, sbom:
     # Resolved before the dry-run exit: a dry run exists to catch bad input without calling
     # the API, so invalid artefact options must still fail here, and the identity derived from
     # the BOM is exactly what a dry run is meant to show.
-    artefact_fields = resolve_artefact_fields(args, sbom)
+    artefact_fields, base_source = resolve_artefact_fields(args, sbom)
     if artefact_fields:
         print("Artefact: " + ", ".join(f"{k}={v}" for k, v in sorted(artefact_fields.items())), flush=True)
+    if base_source == "no-artefact-type":
+        print("Base image source: none (no --artefact-type)", flush=True)
+    else:
+        print(f"Base image source: {base_source}", flush=True)
 
     if args.no_auto_import:
         print(
@@ -413,7 +467,12 @@ def run_sbom_upload_translate(cfg: PhoenixConfig, args: argparse.Namespace, sbom
     # Resolved before the dry-run exit: a dry run exists to catch bad input without calling
     # the API, so invalid artefact options must still fail here, and the identity derived from
     # the BOM is exactly what a dry run is meant to show.
-    artefact_fields = resolve_artefact_fields(args, sbom)
+    if (args.base_image_name or "").strip() or (args.base_image_digest or "").strip():
+        raise ValueError(
+            "--base-image-name/--base-image-digest need the stateful sbom upload; "
+            "remove --scan-type or scan_type in config.ini"
+        )
+    artefact_fields, _ = resolve_artefact_fields(args, sbom, read_base=False)
     if artefact_fields:
         print("Artefact: " + ", ".join(f"{k}={v}" for k, v in sorted(artefact_fields.items())), flush=True)
 
@@ -498,6 +557,8 @@ _ARTEFACT_FLAGS = (
     ("--container-version", "container_version"),
     ("--container-digest", "container_digest"),
     ("--registry", "registry"),
+    ("--base-image-name", "base_image_name"),
+    ("--base-image-digest", "base_image_digest"),
 )
 
 

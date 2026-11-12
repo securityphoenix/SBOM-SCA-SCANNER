@@ -15,7 +15,7 @@ import os
 import sys
 import time
 from dataclasses import dataclass
-from typing import Dict, Optional
+from typing import Dict, Optional, Tuple
 from urllib.parse import urlparse
 
 import requests
@@ -203,6 +203,47 @@ TRANSLATE_PENDING_STATES = {"TRANSLATING", "READY_FOR_IMPORT"}
 ARTEFACT_TYPES = ("BUILD_FILE", "CONTAINER")
 _DIGEST_RE = re.compile(r"^sha256:[0-9a-f]{64}$")
 
+# Base image rules. Same rules as the Phoenix backend (ArtefactSpec) so a bad value fails here
+# with the backend's own message. Keep these functions small: the container lab copies them.
+_BASE_NAME_MAX = 512
+_BASE_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._/:@-]*$")
+_BASE_NAME_DIGEST_RE = re.compile(r"@sha256:([0-9A-Fa-f]{64})$")
+
+
+def normalise_base_image(
+    name: Optional[str], digest: Optional[str]
+) -> Tuple[Optional[Dict[str, str]], Optional[str]]:
+    """
+    Apply every backend rule to a base image name and digest.
+
+    Returns (fields, None) when both are valid, (None, "<backend 400 message>") when a rule
+    fails, and (None, None) when both are blank. Blank after trim counts as absent. The digest is
+    lowercased; a name that ends in @sha256:<hex> must carry the same digest and loses that part.
+    """
+    name = (name or "").strip()
+    digest = (digest or "").strip().lower()
+    if not name and not digest:
+        return None, None
+    if not name or not digest:
+        return None, "baseImageName and baseImageDigest must be sent together"
+
+    errors = []
+    digest_ok = bool(_DIGEST_RE.match(digest))
+    if not digest_ok:
+        errors.append("baseImageDigest must match sha256:<64 hex chars>")
+    if len(name) > _BASE_NAME_MAX:
+        errors.append("baseImageName must be at most 512 characters")
+    if not _BASE_NAME_RE.match(name):
+        errors.append("baseImageName must be an image reference")
+    embedded = _BASE_NAME_DIGEST_RE.search(name)
+    if embedded:
+        if digest_ok and "sha256:" + embedded.group(1).lower() != digest:
+            errors.append("baseImageName digest does not match baseImageDigest")
+        name = name[: embedded.start()]
+    if errors:
+        return None, "; ".join(errors)
+    return {"baseImageName": name, "baseImageDigest": digest}, None
+
 
 def _container_artefact_fields(
     container_name: Optional[str],
@@ -248,8 +289,15 @@ def build_artefact_fields(
     container_version: Optional[str] = None,
     container_digest: Optional[str] = None,
     registry: Optional[str] = None,
+    base_image_name: Optional[str] = None,
+    base_image_digest: Optional[str] = None,
 ) -> Dict[str, str]:
-    """Validate the artefact parameters and return only those that are set."""
+    """
+    Validate the artefact parameters and return only those that are set.
+
+    base_image_name and base_image_digest must already be normalised (normalise_base_image);
+    they are added only for CONTAINER and only when both are set.
+    """
     if not artefact_type:
         return {}
 
@@ -275,6 +323,12 @@ def build_artefact_fields(
         fields.update(
             _container_artefact_fields(container_name, container_version, container_digest, registry)
         )
+        if base_image_name and base_image_digest:
+            fields["baseImageName"] = base_image_name
+            fields["baseImageDigest"] = base_image_digest
+
+    if normalised != "CONTAINER" and (base_image_name or base_image_digest):
+        raise ValueError("base image fields require artefact_type CONTAINER")
 
     return fields
 

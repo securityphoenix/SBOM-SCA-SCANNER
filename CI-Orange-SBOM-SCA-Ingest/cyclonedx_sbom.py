@@ -11,6 +11,8 @@ import urllib.parse
 import os
 from typing import Dict, List, Optional, Tuple
 
+from phoenix_client import normalise_base_image
+
 
 def read_report(path: str) -> Dict:
     """
@@ -384,6 +386,26 @@ def container_identity_from_sbom(sbom: Dict) -> Dict[str, str]:
         out["registry"] = registry.split("/")[0]
 
     return out
+
+
+_BASE_NAME_LABEL = "aquasecurity:trivy:Labels:org.opencontainers.image.base.name"
+_BASE_DIGEST_LABEL = "aquasecurity:trivy:Labels:org.opencontainers.image.base.digest"
+
+
+def base_image_from_sbom(sbom: Dict) -> Tuple[Dict[str, str], Optional[str]]:
+    """
+    Read the OCI base image labels that trivy copies into metadata.component.properties.
+
+    Returns (fields, None), ({}, "<reason>") when a label is half present or fails a backend
+    rule, or ({}, None) when there are no base labels. A label is a claim: the caller warns
+    and uploads without a base image, it never fails the job.
+    """
+    component = (sbom.get("metadata") or {}).get("component") or {}
+    props = {p.get("name"): p.get("value") for p in component.get("properties") or []}
+    fields, reason = normalise_base_image(
+        str(props.get(_BASE_NAME_LABEL) or ""), str(props.get(_BASE_DIGEST_LABEL) or "")
+    )
+    return (fields or {}), reason
 
 
 # purl type -> dep-scan project type, i.e. the value that follows "PhxSbomSca:".
