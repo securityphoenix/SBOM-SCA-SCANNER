@@ -568,6 +568,8 @@ optional; omitting `--artefact-type` reproduces the previous behaviour exactly.
 | `--container-version TAG` | CONTAINER | Image tag |
 | `--container-digest sha256:…` | CONTAINER | Must be `sha256:` plus 64 hex characters |
 | `--registry HOST` | CONTAINER | Registry host |
+| `--base-image-name REF` | CONTAINER | Base image reference. Give it with `--base-image-digest`. See [Base image](#base-image) |
+| `--base-image-digest sha256:…` | CONTAINER | Base image digest. Give it with `--base-image-name` |
 
 For `CONTAINER`, anything not passed is read from the BOM's `metadata.component` - a Trivy image
 SBOM already carries name, tag, digest and registry - so a pipeline usually needs only
@@ -581,6 +583,56 @@ and prints the resolved identity without calling the API.
 These parameters take effect only against a Phoenix organization with in-house translation
 enabled; elsewhere Phoenix validates and discards them, which is why they are safe to send
 unconditionally.
+
+#### Base image
+
+A container upload can carry the image it was built from. Phoenix shows the base image name and
+digest on the container asset, but only when the organisation has the feature switched on. With
+the feature off, Phoenix accepts the upload and ignores the base image.
+
+Two ways to supply it, in this order:
+
+1. **Flags.** Pass both: `--base-image-name registry.example.com/team/base:1.4` and
+   `--base-image-digest sha256:<64 hex characters>`. Flags always win over labels.
+2. **Image labels.** Build the image with the two OCI labels. Trivy copies them into the SBOM and
+   the importer reads them, with no flag needed:
+
+   ```bash
+   docker build \
+     --label org.opencontainers.image.base.name=registry.example.com/team/base:1.4 \
+     --label org.opencontainers.image.base.digest=sha256:<64 hex characters> \
+     -t myregistry.io/payments-api:1.4.2 .
+   ```
+
+Rules, checked before the upload:
+
+- Name and digest go together. One without the other is an error.
+- The digest must be `sha256:` plus 64 hex characters. It is lowercased before it is sent.
+- The name is at most 512 characters. It starts with a letter or digit and holds only letters,
+  digits and `. _ / : @ -`.
+- A name that ends in `@sha256:<64 hex>` must carry the same digest as `--base-image-digest`.
+  The `@sha256:…` part is removed before the name is sent.
+- Blank values count as absent.
+
+What happens when a rule fails depends on where the value came from:
+
+| Source | A rule fails | Result |
+| --- | --- | --- |
+| Flags | The importer prints the reason to stderr | Exit `1`, nothing uploaded |
+| Labels | The importer prints `Warning: <reason>; uploading without a base image` | The upload goes ahead without a base image, exit `0` |
+
+Other limits:
+
+- `--base-image-name` and `--base-image-digest` need `--artefact-type CONTAINER`. With any other
+  type the importer exits `1`.
+- Labels are read only with `--artefact-type CONTAINER`. Without it nothing is read and the
+  output says `Base image source: none (no --artefact-type)`.
+- The translate route (`--scan-type`, or `scan_type` in `config.ini`) takes no base image. The
+  base flags are rejected with exit `1` there, and labels are not read.
+- Only a Trivy CycloneDX SBOM carries the labels. A cdxgen or dep-scan SBOM has none, so use the
+  flags with those.
+- After the `Artefact:` line the importer prints `Base image source: flags`, `labels` or `none`.
+  A dry run prints it too, so check there first.
 
 ### Connection and credentials
 
@@ -702,7 +754,7 @@ by manifest or sub-project; retrying unchanged will not help.
 | Code | Meaning |
 | --- | --- |
 | `0` | Import submitted, or accepted and - with `--wait` - settled successfully. |
-| `1` | Any handled failure: bad configuration, unreadable or non-CycloneDX SBOM, missing context, auth failure, non-2xx response, terminal `ERROR`, or a poll timeout. The reason is printed to stderr. |
+| `1` | Any handled failure: bad configuration, invalid base image flags, unreadable or non-CycloneDX SBOM, missing context, auth failure, non-2xx response, terminal `ERROR`, or a poll timeout. The reason is printed to stderr. |
 | `2` | Invalid command line, from argument parsing. |
 
 A poll timeout exits `1`, but the upload was already accepted - see the note under
