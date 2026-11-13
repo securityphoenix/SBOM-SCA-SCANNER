@@ -204,9 +204,11 @@ pipeline {
             }
         }
 
-        // Base image (container builds): the labels reach the SBOM only from a Trivy image scan
-        // (trivy image <ref>), not from trivy fs, which this pipeline runs. To send a base image from here,
-        // pass --artefact-type CONTAINER with --base-image-name and --base-image-digest instead.
+        // Base image (container builds): image scans (SCAN_MODE=image, trivy image) can carry the labels;
+        // filesystem scans (trivy fs) cannot. Set PHOENIX_METHOD=sbom (image mode defaults to the
+        // vulnerability method, which rejects the flags) and leave PHOENIX_SCAN_TYPE blank (the translate
+        // route takes no base image), then add --artefact-type CONTAINER to the importer. The labels may
+        // supply the base values, so --base-image-name and --base-image-digest are an alternative, not always required.
         // If you also build the image, label it: docker build --label org.opencontainers.image.base.name=<ref> --label org.opencontainers.image.base.digest=<sha256:...> ...
         // See README.md, section "Base image".
         stage('Generate SBOM') {

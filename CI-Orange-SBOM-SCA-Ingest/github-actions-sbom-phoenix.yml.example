@@ -234,7 +234,9 @@ jobs:
 
       # --- trivy: CycloneDX with vulnerabilities -------------------------------------------
       # Base image (container builds): build the image with the two OCI labels, scan it with Trivy in
-      # image mode (scan_mode=image), and add --artefact-type CONTAINER to the importer:
+      # image mode, and add --artefact-type CONTAINER to the importer. This needs phoenix_method=sbom together
+      # with scan_mode=image: phoenix_method=auto resolves to vulnerability for images, and the importer then
+      # rejects --artefact-type (it applies only to --method sbom):
       #   docker build --label org.opencontainers.image.base.name=<ref> --label org.opencontainers.image.base.digest=<sha256:...> ...
       # Without --artefact-type the labels are not read. See README.md, section "Base image".
       - name: Generate SBOM with Trivy

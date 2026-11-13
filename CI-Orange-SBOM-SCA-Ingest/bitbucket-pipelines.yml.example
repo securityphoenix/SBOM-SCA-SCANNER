@@ -19,7 +19,8 @@ pipelines:
           - pip install -r "$IMPORTER_DIR/requirements.txt"
           # Base image (container builds): the labels reach the SBOM only from a Trivy image scan
           # (trivy image <ref>), not from trivy fs, which this pipeline runs. To send a base image from here,
-          # pass --artefact-type CONTAINER with --base-image-name and --base-image-digest instead.
+          # pass --method sbom --artefact-type CONTAINER with --base-image-name and --base-image-digest instead
+          # (the artefact and base image flags apply only to --method sbom; the default method is vulnerability).
           # If you also build the image, label it: docker build --label org.opencontainers.image.base.name=<ref> --label org.opencontainers.image.base.digest=<sha256:...> ...
           # See README.md, section "Base image".
           - docker run --rm -v "$BITBUCKET_CLONE_DIR:/workspace" aquasec/trivy:0.74.0 fs --scanners vuln /workspace --format cyclonedx --output /workspace/sbom.cdx.json
